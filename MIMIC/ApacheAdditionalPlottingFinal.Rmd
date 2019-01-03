@@ -1,0 +1,190 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+```{r}
+log(0.009)
+
+
+sum(fitCCstderr)
+sum(fitMICEstderr)
+sum(fitMRstderr)
+sum(fitMIDASstderr)
+
+
+sum(log(fitCCstderr))
+sum(log(fitMICEstderr))
+sum(log(fitMRstderr))
+sum(log(fitMIDASstderr))
+
+sum(log(fitCCstderr))
+sum(log(fitMICEstderr))
+sum(log(sqrt(fitCCstderr)))
+sum(log(sqrt(fitMICEstderr)))
+sum(sqrt(log(fitCCstderr)))
+sum(sqrt(log(fitMICEstderr)))
+
+sqrt(-sum(log(fitCCstderr)))
+sqrt(-sum(log(fitMICEstderr)))
+sqrt(-sum(log(fitMRstderr)))
+sqrt(-sum(log(fitMIDASstderr)))
+
+
+sum(log(fitMICEstderr))
+sum(log(fitMRstderr))
+sum(log(fitMIDASstderr))
+
+
+sum(log(fitMICEstderr))
+sum(log(fitMRstderr))
+sum(log(fitMIDASstderr))
+
+```
+
+```{r}
+
+library(plotly)
+
+p <- plot_ly(
+  x = c("Complete case", "MIC", "missRanger", "MIDAS"),
+  y = c(-sum(log(fitCCstderr)), -sum(log(fitMICEstderr)), -sum(log(fitMRstderr)), -sum(log(fitMIDASstderr))),
+  name = "Sum of logged Std Errors",
+  type = "bar"
+)
+p
+```
+
+```{r}
+cbind(MICEloss = MICEmeanloss, MRloss = MRmeanloss, MIDASloss = MIDASmeanloss, MIDASVAEloss = MIDASVAEmeanloss, CCLoss=CCmeanloss, adjustedCCLoss = adjustedCCmeanloss)
+```
+
+
+
+```{r}
+plot_ly(
+  x = c("Complete case", "MIC", "missRanger", "MIDAS"),
+  y = c(CCLoss=CCmeanloss, MICEloss = MICEmeanloss, MRloss = MRmeanloss, MIDASloss = MIDASmeanloss),
+  name = "Average Loss",
+  type = "bar",
+  color = I("darkgreen"))
+)
+```
+
+
+```{r}
+
+#dfp = cbind(Complete = CClossvector, MICE = MICElossvector, missRanger = MRlossvector, MIDAS = MIDASlossvector)
+#plot_ly(midwest, x = ~percollege, color = ~state, type = "box")
+#plot_ly(data.frame(CClossvector), type = "box")
+
+method = c(rep("Complete",length(CClossvector)),rep("MICE",length(MICElossvector)),rep("missRanger",length(MRlossvector))
+           ,rep("MIDAS",length(MIDASlossvector)))
+value = c(CClossvector, MICElossvector, MRlossvector, MIDASlossvector)
+data=data.frame(method,value)
+qplot( x=method , y=value , data=data , geom=c("boxplot") , fill=method)
+```
+```{r}
+cmmice = showmetrics(MICEpreds, outcome)
+
+cmmice = confusionMatrix(as.factor( round(MICEpreds)),as.factor(outcome), positive='1')
+cmmice
+cmmice$overall[1]
+```
+```{r}
+cmmice = confusionMatrix(as.factor( round(MICEpreds)),as.factor(outcome), positive='1')
+cmmr = confusionMatrix(as.factor( round(MRpreds)),as.factor(outcome), positive='1')
+cmmidas = confusionMatrix(as.factor( round(MIDASpreds)),as.factor(outcome), positive='1')
+cmcc = confusionMatrix(as.factor( round(CCpreds)),as.factor(CCoutcome), positive='1')
+# cmmice$byClass["Pos Pred Value"]
+#   overall["Accuracy"]
+
+
+method = c("Complete case", "MICE", "missRanger", "MIDAS")
+metric = c("Accuracy", "Brier", "Pos Pred Value", "Neg Pred Value", "Mean Loss", "AUC")
+accuracy = c(cmcc$overall["Accuracy"],cmmice$overall["Accuracy"],cmmr$overall["Accuracy"],cmmidas$overall["Accuracy"])
+accuracy = accuracy/accuracy[1] * 100
+
+Brier = c(CCbrier, MICEbrier, MRbrier, MIDASbrier)
+Brier = Brier/Brier[1] * 100
+
+posPredValue = c(cmcc$byClass["Pos Pred Value"],cmmice$byClass["Pos Pred Value"],cmmr$byClass["Pos Pred Value"],cmmidas$byClass["Pos Pred Value"])
+posPredValue =   posPredValue/posPredValue[1] * 100
+
+negPredValue = c(cmcc$byClass["Neg Pred Value"],cmmice$byClass["Neg Pred Value"],cmmr$byClass["Neg Pred Value"],cmmidas$byClass["Neg Pred Value"])
+negPredValue = negPredValue/negPredValue[1] * 100
+
+meanloss = c(CCmeanloss, MICEmeanloss, MRmeanloss, MIDASmeanloss)
+meanloss = meanloss/meanloss[1] * 100
+
+auc = c(CCci[2], MICEci[2],MRci[2], MIDASci[2])
+auc = auc/auc[1] * 100
+# CCci[1]
+# CCci[2]
+# CCci[3]
+# CCci
+#summarydf = data.frame(method, accuracy, accuracyN, precision, precisionN, negpredvalue, negpredvalueN, meanloss, meanlossN, auc,
+summarydf = data.frame(method, accuracy, Brier, posPredValue, negPredValue, meanloss, auc)
+
+```
+
+```{r}
+# color with RcolorBrewer
+ggplot(summarydf, aes(fill=method, y=value, x=specie)) + 
+    geom_bar( stat="identity", position="fill") +    
+    scale_fill_brewer(palette = "Set1")
+ 
+# Faceting
+ggplot(data, aes(y=value, x=specie, color=specie, fill=specie)) + 
+    geom_bar( stat="identity") +    
+    facet_wrap(~condition)
+```
+
+```{r}
+library(reshape)
+library(data.table)
+
+sdf2 = data.frame(t(summarydf))
+sdf2 
+
+names(sdf2) = summarydf$method
+setDT(sdf2, keep.rownames = TRUE)[]
+colnames(sdf2)[1] <- "Metric"
+
+#sdf3 = sdf2[c(3,5,7,9, 11),]
+sdf3 = sdf2[-1]
+sdf3$"Complete case"=round(as.numeric(as.character(sdf3$"Complete case")),1)
+sdf3$"MICE"=round(as.numeric(as.character(sdf3$"MICE")),1)
+sdf3$"missRanger"=round(as.numeric(as.character(sdf3$"missRanger")),1)
+sdf3$"MIDAS"=round(as.numeric(as.character(sdf3$"MIDAS")),1)
+sdf3
+```
+
+```{r}
+library(reshape2)
+
+# reshape your data into long format
+sdf3l <- melt(sdf3, id=c("Metric"))
+sdf3l
+
+#create color palette:
+library(RColorBrewer)
+coul = brewer.pal(4, "Dark2") 
+
+#values = c("red","blue","green","yellow"), 
+# make the plot
+ggplot(sdf3l) +
+  geom_bar(aes(x = Metric, y = value, fill = variable), 
+           stat="identity", position = "dodge", width = 0.7) +
+  scale_fill_manual("Method\n", values = coul, 
+                    labels = c("Complete Case", "MICE", "missRanger", "MIDAS")) +
+  labs(x="",y="Relative Performance %\n") +
+  ylim(c(0,120)) +
+  theme_bw(base_size = 14) + 
+  theme(axis.text.x = element_text(angle = 60, hjust = 1))
+```
+
+```{r}
+
+```
+
+
