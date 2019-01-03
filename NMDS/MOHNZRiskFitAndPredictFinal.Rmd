@@ -1,0 +1,1382 @@
+---
+title: "R Notebook"
+output:
+  html_document:
+    df_print: paged
+  html_notebook: default
+  pdf_document: default
+  word_document: default
+---
+Objective: Compare impact of MI on In-Hospital Mortality prediction with MOH data
+
+1. MOHInitialClean.Rmd
+2. MOHCreateDatasets.R - creates test and train datasets plus mice imputation
+3. MOHFitAndPredict.Rmd (This file)
+4. HelperFunctions1.R
+
+TBD:MOHExploratory.Rmd (some plots wrt missingness)
+
+```{r}
+library(mice)
+#Load in our helper functions to prep the datasets and do roc plotting
+parentfolder = "c:\\PDH\\Moh\\"
+source(paste0(parentfolder,"HelperFunctions1.R"))
+
+#modelformula = InHospitalMortality ~ 1 + Age + IsMale + ethnicity3Groups+ surg01Spec + surg02Spec+ surg03Spec + 
+#  ASA + Acuity + HasCancer + IsSmoker + WasSmoker
+
+m_30dayformula = Mortality30 ~ 1 + Acuity + Age + HasCancer + threeGroupASA + Surg_grade_4_5 + surg01Spec + gender + ethnicity3Groups
+
+m_365dayformula = Mortality365 ~ 1 + Acuity + Age + HasCancer + threeGroupASA + surg01Spec365 + gender + ethnicity3Groups
+
+m_730dayformula = Mortality730 ~ 1 + Acuity + Age + HasCancer + threeGroupASA + surg01Spec365 + gender + ethnicity3Groups
+
+#most of the prepwork have already been incorporated into our helper classes so minimal transformations is required
+prepNZRisk <- function(df) {
+  df$threeGroupASA = ifelse(df$ASA == 1, yes = "ASA1/2"
+                                  , no = ifelse(df$ASA == 2, yes = "ASA1/2"
+                                      , no = ifelse(df$ASA == 3, yes = "ASA 3"
+                                          , no = ifelse(df$ASA == 4, yes = "ASA 4/5"
+                                              , no = "ASA 4/5"))))
+  
+  df$threeGroupASA = relevel(as.factor(df$threeGroupASA), ref = "ASA1/2")
+  
+  df$gender = ifelse(df$IsMale == 1, yes = "M", no = "F")
+  df$gender = relevel(as.factor(df$gender), ref = "F")
+
+  # Make sure to relevel factors so that the odds ratios appear in the right order
+  df$ethnicity3Groups = relevel(as.factor(df$ethnicity3Groups), ref = 'Not Maori/Pacific')
+  df$Acuity = relevel(as.factor(df$Acuity), ref = "elective")
+  # Depending on the time frame (30d vs longer) digestive is included or not included or not included. It was statistically significant at 30d but not any longer timeframe
+  # Two year model - remove surgery grade + digestive system (same op type classes as 365days)
+  op_types365 = c("1_nervousSystem","other","other","other","other","7_respiratorySystem","8_vascularSystem"
+                 ,"other","other","other","other","other","other","other","other")
+  
+  df$surg01Spec365 = mapvalues(x=df$opChapNum, from = levels(as.factor(as.numeric(as.character(df$opChapNum)))), to=op_types365)
+  df$surg01Spec365 = relevel(as.factor(df$surg01Spec365), ref = "other")
+  return(df)
+}
+
+```
+
+```{r}
+#Load train data and do final prep and transforms before fitting
+
+#load complete case train dataset
+# column information for loading subsequent CSV based training sets
+traincolInfo = c("factor", "factor", "factor", "factor", "factor", "factor", "integer", "factor", "factor", "factor"
+            ,"factor","factor", "factor", "factor", "integer", "integer", "integer", "integer", "integer", "integer"
+            , "integer", "integer", "factor", "factor","factor", "factor", "integer", "factor", "factor", "factor", "factor")
+dfCCtrain <- read.csv(paste0(parentfolder,"MOHFinalCompleteCaseTrain.csv"), header=TRUE
+                ,comment.char = "",  skip =0,  check.names = FALSE, na.strings=c("NA","NaN", ""),colClasses=traincolInfo)
+
+#Load MICE imputed train dataset - previously saved as a mids object
+midsMICEtrain = readRDS(paste0(parentfolder,"MiceMohFinalTrain.rds"))
+dfMICEtrain = complete(midsMICEtrain, "long", include=TRUE)
+# plot(midsmohimptrain)
+
+#MR 0-39 are imputed sets, lets fix this so it has similar structure as mice and midas
+dfMRtrain = readRDS(paste0(parentfolder,"MohFinalMRTrainV2.rds"))
+trainOrg = read.csv(paste0(parentfolder,"MOHFinalPreImputeTrainV2.csv"), header=TRUE
+                      ,comment.char = "",  skip =0,  check.names = FALSE, na.strings=c("NA","NaN", ""),colClasses=traincolInfo)
+dfMRtrain$.imp = dfMRtrain$.imp+1
+trainOrg$.imp=0
+dfMRtrain2 = rbind(trainOrg, dfMRtrain)
+#str(trainOrg)
+#str(dfMRtrain)
+#str(dfMRtrain2)
+#dfmr0 = dfMRtrain[dfMRtrain$.imp==0,]
+#dfmr1 = dfMRtrain[dfMRtrain$.imp==1,]
+
+
+dfMIDAStrain = read.csv(paste0(parentfolder,"MOHMidasE250m40_full.csv"))
+#dfmidas0 = dfMIDAStrain[dfMIDAStrain$.imp==0,]
+#dfmidas1 = dfMIDAStrain[dfMIDAStrain$.imp==1,]
+
+dfMIDASVAEtrain = read.csv(paste0(parentfolder,"MOHMidasE250m40VAE_full.csv"))
+
+#prep the datasets so they can be used for fitting and predictions (releveling factors, mapping to higher grain, changing datatypes, etc.)
+dfCCtrainPrepped=prepDataSet(dfCCtrain)
+dfCCtrainPrepped=prepNamesAndLevel(dfCCtrainPrepped)
+dfCCtrainPrepped=prepNZRisk(dfCCtrainPrepped)
+
+dfMICEtrainPrepped=prepDataSet(dfMICEtrain)
+dfMICEtrainPrepped=prepNamesAndLevel(dfMICEtrainPrepped)
+dfMICEtrainPrepped=prepNZRisk(dfMICEtrainPrepped)
+
+dfMRtrainPrepped=prepDataSet(dfMRtrain2)
+dfMRtrainPrepped=prepFactors(dfMRtrainPrepped)
+dfMRtrainPrepped=prepNZRisk(dfMRtrainPrepped)
+
+dfMIDAStrainPrepped=prepDataSet(dfMIDAStrain)
+dfMIDAStrainPrepped=prepFactors(dfMIDAStrainPrepped)
+dfMIDAStrainPrepped=prepNZRisk(dfMIDAStrainPrepped)
+
+dfMIDASVAEtrainPrepped=prepDataSet(dfMIDASVAEtrain)
+dfMIDASVAEtrainPrepped=prepFactors(dfMIDASVAEtrainPrepped)
+dfMIDASVAEtrainPrepped=prepNZRisk(dfMIDASVAEtrainPrepped)
+#visually verify structure
+# str(dfCCtrainPrepped)
+# str(dfMICEtrainPrepped)
+# str(dfMRtrainPrepped)
+# str(dfMIDAStrainPrepped)
+```
+
+
+```{r}
+
+
+```
+
+
+
+```{r}
+# Using MICE to calculate summary stats and estiamtes
+# This will be the basis to compare against our manual calcs to ensure methodology is correct
+
+#convert newly prep-ed df back to mids object so we can utilise built-in mice functionality
+midsMICEtrainPrepped = as.mids(dfMICEtrainPrepped)
+
+fitMICEmids <- with(midsMICEtrainPrepped,  glm(formula = Mortality30 ~ 1 + Acuity + Age + HasCancer + threeGroupASA + Surg_grade_4_5 + surg01Spec + gender + ethnicity3Groups, family = binomial("logit"), maxit=100), print=F)
+print("Fitted MIPO output for MICE imputed training set")
+pool(fitMICEmids)
+summary(pool(fitMICEmids))
+```
+
+```{r}
+#Fit Models
+#Doing it manually instead - Rolling our own since we will need it later for midas and others 
+m=40
+#fit the model for mice imputed dataset
+fitMICE <- lapply(1:m, function(x) glm(formula=m_30dayformula, family=binomial("logit"), maxit=100, data=dfMICEtrainPrepped[dfMICEtrainPrepped$.imp==x,]))
+
+#fit the model for missRanger imputed dataset
+fitMR <- lapply(1:m, function(x) glm(formula=m_30dayformula, family=binomial("logit"), maxit=100, data=dfMRtrainPrepped[dfMRtrainPrepped$.imp==x,]))
+
+#fit the model for MIDAS imputed dataset
+fitMIDAS <- lapply(1:m, function(x) glm(formula=m_30dayformula, family=binomial("logit"), maxit=100, data=dfMIDAStrainPrepped[dfMIDAStrainPrepped$.imp==x,]))
+
+#fit the model for MIDAS imputed dataset
+fitMIDASVAE <- lapply(1:m, function(x) glm(formula=m_30dayformula, family=binomial("logit"), maxit=100, data=dfMIDASVAEtrainPrepped[dfMIDASVAEtrainPrepped$.imp==x,]))
+
+#fit the model for complete case dataset
+fitCC <- glm(formula = m_30dayformula, family = binomial("logit"), maxit=100, data=dfCCtrainPrepped)
+```
+
+```{r}
+#summary statistics for fitted models
+#calculating coefficients and their means
+fitMICEestimatescoefs = sapply(fitMICE, function(x) summary(x)$coefficients[,1])
+fitMICEestimates = apply(fitMICEestimatescoefs,1,mean)
+#rownames(impfitestimates) = names(impfitted[[1]]$coefficients) #putting the names back in
+#m = number of imputations m = NCOL(impfitestimates)
+
+fitMRestimatescoefs = sapply(fitMR, function(x) summary(x)$coefficients[,1])
+fitMRestimates = apply(fitMRestimatescoefs,1,mean)
+
+fitMIDASestimatescoefs = sapply(fitMIDAS, function(x) summary(x)$coefficients[,1])
+fitMIDASestimates = apply(fitMIDASestimatescoefs,1,mean)
+
+fitMIDASVAEestimatescoefs = sapply(fitMIDASVAE, function(x) summary(x)$coefficients[,1])
+fitMIDASVAEestimates = apply(fitMIDASVAEestimatescoefs,1,mean)
+
+fitCCestimates = summary(fitCC)$coefficients[,1]
+
+# cbind(MICEp.value = round(summary(pool(fitMICEmids))$p.value,4), MICEestimates = summary(pool(fitMICEmids))$estimate, fitMICEestimates, fitMRestimates, fitMIDASestimates, fitMIDASVAEestimates, fitCCestimates )
+
+cbind( MICE = round(fitMICEestimates,3)
+       , missRanger = round(fitMRestimates,3)
+       , MIDAS = round(fitMIDASestimates,3)
+       , MIDASVAE = round(fitMIDASVAEestimates,3)
+       , "Complete Case" = round(fitCCestimates,3)
+       , "p.value(MICE)" = round(summary(pool(fitMICEmids))$p.value,3) )
+```
+
+
+```{r}
+#calculating total variance and std. errors
+fitMICEstderr = sapply(fitMICE, function(x) summary(x)$coefficients[,2])
+fitMICEVarWithin = apply(fitMICEstderr^2,1,mean)                            #within imputation variance of prediction
+fitMICEVarBetween = rowSums((fitMICEestimatescoefs-fitMICEestimates)^2)/(m-1) #between imputation variance of prediction
+fitMICETotalVariance = fitMICEVarWithin + fitMICEVarBetween * (1+1/m)
+
+fitMRstderr = sapply(fitMR, function(x) summary(x)$coefficients[,2])
+fitMRVarWithin = apply(fitMRstderr^2,1,mean)                            #within imputation variance of prediction
+fitMRVarBetween = rowSums((fitMRestimatescoefs-fitMRestimates)^2)/(m-1) #between imputation variance of prediction
+fitMRTotalVariance = fitMRVarWithin + fitMRVarBetween * (1+1/m)
+
+
+fitMIDASstderr = sapply(fitMIDAS, function(x) summary(x)$coefficients[,2])
+fitMIDASVarWithin = apply(fitMIDASstderr^2,1,mean)                            #within imputation variance of prediction
+fitMIDASVarBetween = rowSums((fitMIDASestimatescoefs-fitMIDASestimates)^2)/(m-1) #between imputation variance of prediction
+fitMIDASTotalVariance = fitMIDASVarWithin + fitMIDASVarBetween * (1+1/m)
+
+fitMIDASVAEstderr = sapply(fitMIDASVAE, function(x) summary(x)$coefficients[,2])
+fitMIDASVAEVarWithin = apply(fitMIDASVAEstderr^2,1,mean)                            #within imputation variance of prediction
+fitMIDASVAEVarBetween = rowSums((fitMIDASVAEestimatescoefs-fitMIDASVAEestimates)^2)/(m-1) #between imputation variance of prediction
+fitMIDASVAETotalVariance = fitMIDASVAEVarWithin + fitMIDASVAEVarBetween * (1+1/m)
+
+
+fitCCstderr = summary(fitCC)$coefficients[,2]
+fitCCVariance = fitCCstderr^2
+
+# cbind(MICEVariance = round(summary(pool(fitMICEmids))$std.error^2,6), fitMICETotalVariance = round(fitMICETotalVariance,6), fitMRTotalVariance = round(fitMRTotalVariance,6), fitMIDASTotalVariance = round(fitMIDASTotalVariance,6),
+#  fitMIDASVAETotalVariance = round(fitMIDASVAETotalVariance,6), fitCCVariance= round(fitCCVariance,6))
+
+# print("sqrt to get std.errors")
+# cbind(MICEstd.error= round(summary(pool(fitMICEmids))$std.error,6), fitMICEstd.error=round(sqrt(fitMICETotalVariance),6), fitMRstd.error=round(sqrt(fitMRTotalVariance),6),fitMIDASstd.error=round(sqrt(fitMIDASTotalVariance),6), 
+#       fitMIDASVAEstd.error=round(sqrt(fitMIDASVAETotalVariance),6), fitCCstderr=round(fitCCstderr,6) )
+
+#ss1 = cbind(mstd.error = summary(pool(fit1))$std.error, m2std.error=sqrt(impfitTotalVariancePred), ccstd.error=summary(fittedCC)$coefficients[,2])
+#round((ss1[,3]-ss1[,2]),4)
+
+cat("Standard error\n")
+cbind( MICE = round(sqrt(fitMICETotalVariance),4)
+       , missRanger = round(sqrt(fitMRTotalVariance),4)
+       , MIDAS = round(sqrt(fitMIDASTotalVariance),4)
+       , MIDASVAE = round(sqrt(fitMIDASVAETotalVariance),4)
+       , "Complete Case" = round(fitCCstderr,4))
+```
+
+```{r}
+cat("Standard errors relative to Complete Case\n")
+cbind("Complete Case"=round(fitCCstderr,2), 
+      MICE=round(sqrt(fitMICETotalVariance)-fitCCstderr,2),
+      missRanger=round(sqrt(fitMRTotalVariance)-fitCCstderr,2),
+      MIDAS=round(sqrt(fitMIDASTotalVariance)-fitCCstderr,2), 
+      MIDASVAE=round(sqrt(fitMIDASVAETotalVariance)-fitCCstderr,2))
+```
+
+
+```{r}
+#FMI calculations
+#possible alt: we can approximate as m gets very large,  fmi = VarBetween/TotalVariance, approxfmi = impfitVarBetween/impfitTotalVariancePred
+
+#Theory and equations from https://www.ncbi.nlm.nih.gov/pmc/articles/PMC4934387/
+#fmi = (r+2/(v+3))/(r+1) where r is relative increase in variance due to nonresponse and v is degress of freedom
+#r=(1+1/m)B/U where is B is between imputation variance and U is within variance imputation
+#B=impfitVarBetween and #B=impfitVarBetween
+getfmi <- function (B, U, m) {
+  r=(1+1/m)*B/U
+  v=(m-1)*(1+1/r)^2 #v degrees of freedom is given by v=(m-1)(1+1/r)^2
+  fmi = (r+2/(v+3))/(r+1)
+  return (fmi)  
+}
+
+#calculate fraction of missing information
+MICEfmi = getfmi(fitMICEVarBetween, fitMICEVarWithin, m)
+MRfmi = getfmi(fitMRVarBetween, fitMRVarWithin, m)
+MIDASfmi = getfmi(fitMIDASVarBetween, fitMIDASVarWithin, m)
+MIDASVAEfmi = getfmi(fitMIDASVAEVarBetween, fitMIDASVAEVarWithin, m)
+MICEmidsfmi = pool(fitMICEmids)$pooled$fmi #retrieve fmi from mice mipo object
+
+#calculate proportion of missing information
+dforg = dfMICEtrainPrepped[dfMICEtrainPrepped$.imp==0,]
+dforgcc = na.omit(dforg)
+propOfMissingInfo = 1 - nrow(dforgcc)/nrow(dforg)
+
+cat('Fraction of Missing Information for imputed models vs proportion of missing information (complete case)\n')
+#cbind(estimate=impfitmeanestimates, std.error=sqrt(impfitTotalVariancePred), fmi, micefmi, propOfMissingInfo)
+# cbind(MICEmidsfmi=round(MICEmidsfmi,4), MICEfmi=round(MICEfmi,4), MRfmi=round(MRfmi,4), 
+#       MIDASfmi=round(MIDASfmi,4), MIDASVAEfmi=round(MIDASVAEfmi,4), propOfMissingInfo=round(propOfMissingInfo,4))
+cbind(MICE=round(MICEfmi,2), missRanger=round(MRfmi,2), 
+      MIDAS=round(MIDASfmi,2), MIDASVAE=round(MIDASVAEfmi,2)
+      , "Prop. Of Missing Info"=round(propOfMissingInfo,2))
+
+```
+
+
+
+```{r}
+#Predict with test datasets
+#Load test data and do final prep and transforms before predictions
+
+testcolInfo = c("factor", "factor", "factor", "factor", "factor", "factor", "integer", "factor", "factor", "factor"
+            ,"factor","factor", "factor", "factor", "integer", "integer", "integer", "integer", "integer", "integer"
+            , "integer", "integer", "factor","factor", "factor", "integer", "factor")
+dfCCtest <- read.csv(paste0(parentfolder,"MOHFinalCompleteCaseTest.csv"), header=TRUE
+                ,comment.char = "",  skip =0,  check.names = FALSE, na.strings=c("NA","NaN", ""),colClasses=traincolInfo)
+
+#Load MICE imputed train dataset - previously saved as a mids object
+midsMICEtest = readRDS(paste0(parentfolder,"MiceMohFinalTest.rds"))
+dfMICEtest =  complete(midsMICEtest, "long", include=TRUE)
+# plot(midsMICEtest)
+
+#,colClasses=testcolInfo
+#MR 0-39 are imputed sets, lets fix this so it has similar structure as mice and midas
+dfMRtest = readRDS(paste0(parentfolder,"MohFinalMRTestV2.rds"))
+testOrgStripped = read.csv(paste0(parentfolder,"MOHFinalPreImputeTestV2.csv"), header=TRUE
+                      ,comment.char = "",  skip =0,  check.names = FALSE, na.strings=c("NA","NaN", ""))
+#str(testOrgStripped)
+dfMRtest$.imp = dfMRtest$.imp+1
+testOrgStripped$.imp=0
+#str(trainOrg)
+dfMRtest2 = rbind(testOrgStripped, dfMRtest)
+#str(trainOrg)
+#str(dfMRtrain)
+#str(dfMRtrain2)
+#dfmr0 = dfMRtrain[dfMRtrain$.imp==0,]
+#dfmr1 = dfMRtrain[dfMRtrain$.imp==1,]
+
+dfMIDAStest = read.csv(paste0(parentfolder,"MOHMidasE250m40TEST_full.csv"))
+
+dfMIDASVAEtest = read.csv(paste0(parentfolder,"MOHMidasE250m40VAETEST_full.csv"))
+
+#prep the datasets so they can be used for fitting and predictions (releveling factors, mapping to higher grain, changing datatypes, etc.)
+dfCCtestPrepped=prepDataSet(dfCCtest)
+dfCCtestPrepped=prepNamesAndLevel(dfCCtestPrepped)
+dfCCtestPrepped=prepNZRisk(dfCCtestPrepped)
+
+dfMICEtestPrepped=prepDataSet(dfMICEtest)
+dfMICEtestPrepped=prepNamesAndLevel(dfMICEtestPrepped)
+dfMICEtestPrepped=prepNZRisk(dfMICEtestPrepped)
+
+dfMRtestPrepped=prepDataSet(dfMRtest2)
+dfMRtestPrepped=prepFactors(dfMRtestPrepped)
+dfMRtestPrepped=prepNZRisk(dfMRtestPrepped)
+
+dfMIDAStestPrepped=prepDataSet(dfMIDAStest)
+dfMIDAStestPrepped=prepFactors(dfMIDAStestPrepped)
+dfMIDAStestPrepped=prepNZRisk(dfMIDAStestPrepped)
+
+dfMIDASVAEtestPrepped=prepDataSet(dfMIDASVAEtest)
+dfMIDASVAEtestPrepped=prepFactors(dfMIDASVAEtestPrepped)
+dfMIDASVAEtestPrepped=prepNZRisk(dfMIDASVAEtestPrepped)
+#visually verify structure
+# str(dfCCtrainPrepped)
+#str(dfMICEtrainPrepped)
+#str(dfMRtrainPrepped)
+#str(dfMIDAStrainPrepped)
+
+#loading org file to compare response/outcome for imputations
+dfFulltest <- read.csv(paste0(parentfolder,"MOHFinalOrgTest.csv"), header=TRUE
+                ,comment.char = "",  skip =0,  check.names = FALSE, na.strings=c("NA","NaN", ""), colClasses=traincolInfo)
+dfFulltestPrepped=prepDataSet(dfFulltest)
+dfFulltestPrepped=prepNamesAndLevel(dfFulltestPrepped)
+dfFulltestPrepped=prepNZRisk(dfFulltestPrepped)
+
+```
+
+```{r}
+#Calculate predictions using fitted model on test datasets
+
+#create model matrix for each imputed test dataset
+MICEmodelmatrix <- lapply(1:m, function(x)  model.matrix( ~ 1 + Acuity + Age + HasCancer + threeGroupASA + Surg_grade_4_5 + surg01Spec + gender + ethnicity3Groups
+                                                , data=dfMICEtestPrepped[dfMICEtestPrepped$.imp==x,]))
+
+MRmodelmatrix <- lapply(1:m, function(x)  model.matrix(  ~ 1 + Acuity + Age + HasCancer + threeGroupASA + Surg_grade_4_5 + surg01Spec + gender + ethnicity3Groups
+                                                , data=dfMRtestPrepped[dfMRtestPrepped$.imp==x,]))
+
+MIDASmodelmatrix <- lapply(1:m, function(x)  model.matrix(  ~ 1 + Acuity + Age + HasCancer + threeGroupASA + Surg_grade_4_5 + surg01Spec + gender + ethnicity3Groups
+                                                , data=dfMIDAStestPrepped[dfMIDAStestPrepped$.imp==x,]))
+
+MIDASVAEmodelmatrix <- lapply(1:m, function(x)  model.matrix(  ~ 1 + Acuity + Age + HasCancer + threeGroupASA + Surg_grade_4_5 + surg01Spec + gender + ethnicity3Groups
+                                                , data=dfMIDASVAEtestPrepped[dfMIDASVAEtestPrepped$.imp==x,]))
+
+#get list of vectors containing predictions for each imputed test dataset
+MICEpredslogit <- lapply(1:m, function(x) t(fitMICEestimates %*% t(MICEmodelmatrix[[x]])))
+MRpredslogit <- lapply(1:m, function(x) t(fitMRestimates %*% t(MRmodelmatrix[[x]])))
+MIDASpredslogit <- lapply(1:m, function(x) t(fitMIDASestimates %*% t(MIDASmodelmatrix[[x]])))
+MIDASVAEpredslogit <- lapply(1:m, function(x) t(fitMIDASVAEestimates %*% t(MIDASVAEmodelmatrix[[x]])))
+
+
+#convert predictions to probabilty with inverse logit
+MICEpredsmatrix <- sapply(MICEpredslogit, function(x) plogis(x))
+MICEpredslist <- lapply(1:m, function(x) plogis(MICEpredslogit[[x]]))
+#probs <- lapply(1:40, function(x) plogis(preds[[x]]))
+#prb1 = as.vector(probs[[1]])
+#prb1m = probasmatrix[,1]
+#all(prb1 == prb1m)
+MRpredsmatrix <- sapply(MRpredslogit, function(x) plogis(x))
+MRpredslist <- lapply(1:m, function(x) plogis(MRpredslogit[[x]]))
+
+MIDASpredsmatrix <- sapply(MIDASpredslogit, function(x) plogis(x))
+MIDASpredslist <- lapply(1:m, function(x) plogis(MIDASpredslogit[[x]]))
+
+MIDASVAEpredsmatrix <- sapply(MIDASVAEpredslogit, function(x) plogis(x))
+MIDASVAEpredslist <- lapply(1:m, function(x) plogis(MIDASVAEpredslogit[[x]]))
+
+
+#combine the m sets of probabilities by taking the mean
+MICEpreds = apply(MICEpredsmatrix, 1, mean)
+MRpreds = apply(MRpredsmatrix, 1, mean)
+MIDASpreds = apply(MIDASpredsmatrix, 1, mean)
+MIDASVAEpreds = apply(MIDASVAEpredsmatrix, 1, mean)
+
+#this has fewer rows 
+CCpreds <- predict.glm(fitCC, newdata = dfCCtestPrepped, type="response")
+
+```
+
+```{r}
+#calculate loss
+outcome = as.numeric(as.character(dfFulltest$InHospitalMortality))
+CCoutcome = as.numeric(as.character(dfCCtestPrepped$InHospitalMortality))
+
+#MICEpredresult = data.frame(prediction=MICEpreds, outcome)
+MICElossvector = ifelse(outcome==1, yes=-log(MICEpreds), no=-log(1-MICEpreds))
+MICEmeanloss = mean(MICElossvector)
+MICEsumloss = sum(MICElossvector)
+
+MRlossvector = ifelse(outcome==1, yes=-log(MRpreds), no=-log(1-MRpreds))
+MRmeanloss = mean(MRlossvector)
+MRsumloss = sum(MRlossvector)
+
+#MIDASpredresult = data.frame(prediction=MIDASpreds, outcome)
+MIDASlossvector = ifelse(outcome==1, yes=-log(MIDASpreds), no=-log(1-MIDASpreds))
+MIDASmeanloss = mean(MIDASlossvector)
+MIDASsumloss = sum(MIDASlossvector)
+
+MIDASVAElossvector = ifelse(outcome==1, yes=-log(MIDASVAEpreds), no=-log(1-MIDASVAEpreds))
+MIDASVAEmeanloss = mean(MIDASVAElossvector)
+MIDASVAEsumloss = sum(MIDASVAElossvector)
+
+#for complete case
+CClossvector = ifelse(CCoutcome==1, yes=-log(CCpreds), no=-log(1-CCpreds))
+# Mean loss lower could suggest patients in complete case records are....easier to predict? or are thy healthier from population perspective?
+CCmeanloss = mean(CClossvector) 
+CCsumloss = sum(CClossvector) #This loss is for fewer records so not comparing apples with apples
+
+
+#Calculating a "TRUE-er" loss
+#Issue with missing data: There is a bunch of ppl we can't predict, so we predict based on average distribution of mortality
+#To adjust for effect of records missing values, instead of dropping them, we should give the affected rows probability of sum(inhospitalmortality)/total records
+#we can use sum(outcome)/nrow(dfFulltest) since the distribution should be approximately the same as whole dataset
+
+#using distribution of mortality as default probability
+probabilityOfMortality=sum(as.numeric(as.character(dfFulltest$InHospitalMortality)))/nrow(dfFulltest)
+
+#we pass a test df with nas into fitted model
+adjustedCCpreds <- predict.glm(fitCC, newdata = dfFulltestPrepped, type="response")
+#this is the adjusted predictions where we fill in blanks with the default probability based on mortality distribution
+adjustedCCpreds[which(is.na(adjustedCCpreds)==1)] = probabilityOfMortality
+
+adjustedCClossvector = ifelse(outcome==1, yes=-log(adjustedCCpreds), no=-log(1-adjustedCCpreds))
+adjustedCCmeanloss = mean(adjustedCClossvector) 
+adjustedCCsumloss = sum(adjustedCClossvector)
+
+# cat("mean loss\n")
+# cbind(MICEloss = MICEmeanloss, MRloss = MRmeanloss, MIDASloss = MIDASmeanloss, MIDASVAEloss = MIDASVAEmeanloss, CCLoss=CCmeanloss, adjustedCCLoss = adjustedCCmeanloss)
+# 
+# cat("\nsum loss\n")
+# cbind(MICEloss = MICEsumloss, MRloss = MRsumloss, MIDASloss = MIDASsumloss, MIDASVAEloss = MIDASVAEsumloss, CCLoss=CCsumloss, adjustedCCLoss = adjustedCCsumloss)
+
+cat("Mean Loss\n")
+cbind(MICE = round(MICEmeanloss,3), missRanger = round(MRmeanloss,3), MIDAS = round(MIDASmeanloss,3), MIDASVAE = round(MIDASVAEmeanloss,3), "Complete Case"= round(CCmeanloss,3), "Adjusted CC" = round(adjustedCCmeanloss,3))
+
+cat("\nSum Loss\n")
+cbind(MICE = round(MICEsumloss,2), missRanger = round(MRsumloss,2), MIDAS = round(MIDASsumloss,2), MIDASVAE = round(MIDASVAEsumloss,2), "Complete Case"= round(CCsumloss,2), "Adjusted CC" = round(adjustedCCsumloss,2))
+
+```
+
+```{r}
+## TODO: these calculations need review
+cat("\ncalculations need to be reviewed\n")
+library(pscl)
+library(pROC)
+
+cat("\nMICE AUC and CI\n")
+MICEroc = roc(outcome~MICEpreds)
+MICEauc = auc(MICEroc)
+MICEauc
+MICEci = ci(MICEroc)
+MICEci
+print("Above only takes into account within imputation variance - we need to take into account both between imputation variance and within imputation variance")
+
+#manual calculations - one auc for each dataset
+cat("\nCalculating manually - MICE\n")
+MICEmanualroc <- lapply(1:m, function(x) roc(outcome~as.vector(MICEpredslist[[x]])))
+MICEmanualaucvector = sapply(MICEmanualroc, function(x) auc(x))
+MICEmanualaucmean = mean(MICEmanualaucvector)
+
+#TODO: check this
+#variance = sum of (xi-xmean)^2 divided by m-1 but gives us only inbetween imputation variance
+#auc ci reflects our within imputation variance - we can divide by 1.96 and ^2 to get the within imputation variance
+n=nrow(dfMICEtestPrepped)
+
+#this is our in between imputation variance
+MICEmanualaucBvar = sum((MICEmanualaucvector-MICEmanualaucmean)^2)/(m-1) #variance = sum of (xi-xmean)^2 divided by m-1
+#this is our within imputation variance i.e.((upper CI - lower CI)/1.96)^2
+MICEmanualaucWvar = ((MICEci[[3]]-MICEci[[2]])/1.96)^2
+MICEmanualaucTotalVar = MICEmanualaucWvar + MICEmanualaucBvar * (1+1/m)
+
+#this needs to be checked
+MICEmanualaucstderror = sqrt(MICEmanualaucTotalVar)
+#TODO: check do we need sqrt(n)?? i.e. lower ci = gmean-1.96*gse/sqrt(n) and upperci = gmean+1.96*gse/sqrt(n)
+cbind(auc=MICEmanualaucmean, lowerci = MICEmanualaucmean-1.96*MICEmanualaucstderror, upperci = MICEmanualaucmean+1.96*MICEmanualaucstderror, 
+      std.error = MICEmanualaucstderror)
+
+#missRanger
+cat("\nmissRanger AUC and CI\n")
+MRroc = roc(outcome~MRpreds)
+MRauc = auc(MRroc)
+MRauc
+MRci = ci(MRroc)
+MRci
+print("Above only takes into account within imputation variance - we need to take into account both between imputation variance and within imputation variance")
+
+cat("\nCalculating manually - missRanger\n")
+MRmanualroc <- lapply(1:m, function(x) roc(outcome~as.vector(MRpredslist[[x]])))
+MRmanualaucvector = sapply(MRmanualroc, function(x) auc(x))
+MRmanualaucmean = mean(MRmanualaucvector)
+
+n=nrow(dfMRtestPrepped)
+MRmanualaucBvar = sum((MRmanualaucvector-MRmanualaucmean)^2)/(m-1) #this is our in between imputation variance
+MRmanualaucWvar = ((MRci[[3]]-MRci[[2]])/1.96)^2 #this is our within imputation variance i.e.((upper CI - lower CI)/1.96)^2
+MRmanualaucTotalVar = MRmanualaucWvar + MRmanualaucBvar * (1+1/m)
+
+MRmanualaucstderror = sqrt(MRmanualaucTotalVar)
+cbind(auc=MRmanualaucmean, lowerci = MRmanualaucmean-1.96*MRmanualaucstderror, upperci = MRmanualaucmean+1.96*MRmanualaucstderror,
+      std.error = MRmanualaucstderror)
+
+
+#MIDAS
+cat("\nMIDAS AUC and CI\n")
+MIDASroc = roc(outcome~MIDASpreds)
+MIDASauc = auc(MIDASroc)
+MIDASauc
+MIDASci = ci(MIDASroc)
+MIDASci
+print("Above only takes into account within imputation variance - we need to take into account both between imputation variance and within imputation variance")
+
+cat("\nCalculating manually - MIDAS\n")
+MIDASmanualroc <- lapply(1:m, function(x) roc(outcome~as.vector(MIDASpredslist[[x]])))
+MIDASmanualaucvector = sapply(MIDASmanualroc, function(x) auc(x))
+MIDASmanualaucmean = mean(MIDASmanualaucvector)
+
+n=nrow(dfMIDAStestPrepped)
+MIDASmanualaucBvar = sum((MIDASmanualaucvector-MIDASmanualaucmean)^2)/(m-1) #this is our in between imputation variance
+MIDASmanualaucWvar = ((MIDASci[[3]]-MIDASci[[2]])/1.96)^2 #this is our within imputation variance i.e.((upper CI - lower CI)/1.96)^2
+MIDASmanualaucTotalVar = MIDASmanualaucWvar + MIDASmanualaucBvar * (1+1/m)
+
+MIDASmanualaucstderror = sqrt(MIDASmanualaucTotalVar)
+cbind(auc=MIDASmanualaucmean, lowerci = MIDASmanualaucmean-1.96*MIDASmanualaucstderror, upperci = MIDASmanualaucmean+1.96*MIDASmanualaucstderror,
+      std.error = MIDASmanualaucstderror)
+
+#MIDAS VAE
+cat("\nMIDAS VAE AUC and CI\n")
+MIDASVAEroc = roc(outcome~MIDASVAEpreds)
+MIDASVAEauc = auc(MIDASVAEroc)
+MIDASVAEauc
+MIDASVAEci = ci(MIDASVAEroc)
+MIDASVAEci
+print("Above only takes into account within imputation variance - we need to take into account both between imputation variance and within imputation variance")
+
+cat("\nCalculating manually - MIDAS VAE\n")
+MIDASVAEmanualroc <- lapply(1:m, function(x) roc(outcome~as.vector(MIDASVAEpredslist[[x]])))
+MIDASVAEmanualaucvector = sapply(MIDASVAEmanualroc, function(x) auc(x))
+MIDASVAEmanualaucmean = mean(MIDASVAEmanualaucvector)
+
+n=nrow(dfMIDASVAEtestPrepped)
+MIDASVAEmanualaucBvar = sum((MIDASVAEmanualaucvector-MIDASVAEmanualaucmean)^2)/(m-1) #this is our in between imputation variance
+MIDASVAEmanualaucWvar = ((MIDASVAEci[[3]]-MIDASVAEci[[2]])/1.96)^2 #this is our within imputation variance i.e.((upper CI - lower CI)/1.96)^2
+MIDASVAEmanualaucTotalVar = MIDASVAEmanualaucWvar + MIDASVAEmanualaucBvar * (1+1/m)
+
+MIDASVAEmanualaucstderror = sqrt(MIDASVAEmanualaucTotalVar)
+cbind(auc=MIDASVAEmanualaucmean, lowerci = MIDASVAEmanualaucmean-1.96*MIDASVAEmanualaucstderror, upperci = MIDASVAEmanualaucmean+1.96*MIDASVAEmanualaucstderror,
+      std.error = MIDASVAEmanualaucstderror)
+
+
+#AUC for complete case and adjusted complete case
+cat("\nAUC and CI for Complete Case\n")
+CCroc = roc(CCoutcome~CCpreds)
+(auc(CCroc))
+CCci = ci(CCroc)
+CCci
+cat("std.error")
+(CCstd.error = ((CCci[[3]]-CCci[[2]])/1.96))
+cat("\nAUC and CI for Adjusted Complete Case\n")
+adjustedCCroc = roc(outcome~adjustedCCpreds)
+(auc(adjustedCCroc))
+adjustedCCci = ci(adjustedCCroc)
+adjustedCCci
+cat("std.error")
+(CCstd.error = ((CCci[[3]]-CCci[[2]])/1.96))
+```
+
+
+```{r}
+#Other scores and statistical validation
+#Brier score from - https://stackoverflow.com/questions/25149023/how-to-find-the-brier-score-of-a-logistic-regression-model-in-r
+#pred.prob <- predict(m_30day,type='response')
+#brierScore <- mean((pred.prob-train$deathAt30)^2); brierScore
+#brierScore <- mean((as.numeric(as.character(pred.prob))-as.numeric(as.character(train$deathAt30)))^2)
+# Brier score; if you have several samples, you'll want to calculate the squared differences (forecast outcome)2 first, 
+# then add those up, and then divide by N. Similar to the mean squared error. 
+
+MICEbrier = mean((MICEpreds - outcome)^2)
+MRbrier = mean((MRpreds - outcome)^2)
+MIDASbrier = mean((MIDASpreds - outcome)^2)
+MIDASVAEbrier = mean((MIDASVAEpreds - outcome)^2)
+CCbrier = mean((CCpreds - CCoutcome)^2)
+adjustedCCbrier = mean((adjustedCCpreds - outcome)^2)
+
+cat("\nBrier scores\n")
+cbind(MICEbrier, MRbrier, MIDASbrier, MIDASVAEbrier, CCbrier, adjustedCCbrier)
+#lower is better... normally
+```
+
+```{r}
+library(grid)
+
+vplayout <- function(x, y) viewport(layout.pos.row = x, layout.pos.col = y)
+#par(mfrow=c(2,2))
+
+MICEdistribution = plot_pred_type_distribution(data.frame(pred=MICEpreds, outcome), 0.5)
+MRdistribution = plot_pred_type_distribution(data.frame(pred=MRpreds, outcome), 0.5)
+MIDASdistribution = plot_pred_type_distribution(data.frame(pred=MIDASpreds, outcome), 0.5)
+MIDASVAEdistribution = plot_pred_type_distribution(data.frame(pred=MIDASVAEpreds, outcome), 0.5)
+CCdistribution = plot_pred_type_distribution(data.frame(pred=CCpreds, outcome=CCoutcome), 0.5)
+adjustedCCdistribution = plot_pred_type_distribution(data.frame(pred=adjustedCCpreds, outcome), 0.5)
+
+
+grid.newpage()
+pushViewport(viewport(layout = grid.layout(1, 2)))
+print(MICEdistribution, vp = vplayout(1, 1))
+print(MRdistribution, vp = vplayout(1, 2))
+
+grid.newpage()
+pushViewport(viewport(layout = grid.layout(1, 2)))
+print(MIDASdistribution, vp = vplayout(1, 1))
+print(MIDASVAEdistribution, vp = vplayout(1, 2))
+
+
+grid.newpage()
+pushViewport(viewport(layout = grid.layout(1, 2)))
+print(CCdistribution, vp = vplayout(1, 1))
+print(adjustedCCdistribution, vp = vplayout(1, 2))
+
+
+grid.newpage()
+pushViewport(viewport(layout = grid.layout(1, 2)))
+print(MIDASdistribution, vp = vplayout(1, 1))
+print(MRdistribution, vp = vplayout(1, 2))
+
+
+```
+
+```{r}
+library(grid)
+
+vplayout <- function(x, y) viewport(layout.pos.row = x, layout.pos.col = y)
+#par(mfrow=c(2,2))
+
+MICEdistribution = plot_pred_type_distribution2(data.frame(pred=MICEpreds, outcome), 0.5, "MICE")
+MRdistribution = plot_pred_type_distribution2(data.frame(pred=MRpreds, outcome), 0.5, "missRanger")
+MIDASdistribution = plot_pred_type_distribution2(data.frame(pred=MIDASpreds, outcome), 0.5, "MIDAS")
+MIDASVAEdistribution = plot_pred_type_distribution2(data.frame(pred=MIDASVAEpreds, outcome), 0.5, "MIDASVAE")
+CCdistribution = plot_pred_type_distribution2(data.frame(pred=CCpreds, outcome=CCoutcome), 0.5, "Complete Case")
+adjustedCCdistribution = plot_pred_type_distribution2(data.frame(pred=adjustedCCpreds, outcome), 0.5, "Adjusted CC")
+
+
+grid.newpage()
+pushViewport(viewport(layout = grid.layout(1, 2)))
+print(MICEdistribution, vp = vplayout(1, 1))
+print(MRdistribution, vp = vplayout(1, 2))
+
+grid.newpage()
+pushViewport(viewport(layout = grid.layout(1, 2)))
+print(MIDASdistribution, vp = vplayout(1, 1))
+print(MIDASVAEdistribution, vp = vplayout(1, 2))
+
+
+grid.newpage()
+pushViewport(viewport(layout = grid.layout(1, 2)))
+print(CCdistribution, vp = vplayout(1, 1))
+print(adjustedCCdistribution, vp = vplayout(1, 2))
+
+
+grid.newpage()
+pushViewport(viewport(layout = grid.layout(1, 2)))
+print(MIDASdistribution, vp = vplayout(1, 1))
+print(MRdistribution, vp = vplayout(1, 2))
+
+```
+
+```{r}
+cat("\nMICE\n")
+MICERoc =    calculate_roc (data.frame(pred=MICEpreds, outcome), 1, 2, n=1000)
+plot_roc(MICERoc, 0.5, 1, 2)
+
+cat("\nmissRanger\n")
+MRRoc =    calculate_roc (data.frame(pred=MRpreds, outcome), 1, 2, n=1000)
+plot_roc(MRRoc, 0.5, 1, 2)
+
+cat("\nMIDAS\n")
+MIDASRoc =    calculate_roc (data.frame(pred=MIDASpreds, outcome), 1, 2, n=1000)
+plot_roc(MIDASRoc, 0.5, 1, 2)
+
+cat("\nMIDASVAE\n")
+MIDASVAERoc =    calculate_roc (data.frame(pred=MIDASVAEpreds, outcome), 1, 2, n=1000)
+plot_roc(MIDASVAERoc, 0.5, 1, 2)
+
+
+cat("\nComplete Case\n")
+CCRoc =    calculate_roc (data.frame(pred=CCpreds, outcome=CCoutcome), 1, 2, n=1000)
+plot_roc(CCRoc, 0.5, 1, 2)
+
+cat("\nAdjusted Complete Case\n")
+adjustedCCRoc =    calculate_roc (data.frame(pred=adjustedCCpreds, outcome), 1, 2, n=1000)
+plot_roc(adjustedCCRoc, 0.5, 1, 2)
+
+cat("\nMICE\n")
+plot(MICEroc, print.auc=TRUE, auc.polygon=TRUE, grid=c(0.1, 0.2),
+     grid.col=c("green", "red"), max.auc.polygon=TRUE,
+     auc.polygon.col="skyblue", print.thres=TRUE)
+
+cat("\nmissRanger\n")
+plot(MRroc, print.auc=TRUE, auc.polygon=TRUE, grid=c(0.1, 0.2),
+     grid.col=c("green", "red"), max.auc.polygon=TRUE,
+     auc.polygon.col="skyblue", print.thres=TRUE)
+
+cat("\nMIDAS\n")
+plot(MIDASroc, print.auc=TRUE, auc.polygon=TRUE, grid=c(0.1, 0.2),
+     grid.col=c("green", "red"), max.auc.polygon=TRUE,
+     auc.polygon.col="skyblue", print.thres=TRUE)
+
+cat("\nMIDASVAE\n")
+plot(MIDASVAEroc, print.auc=TRUE, auc.polygon=TRUE, grid=c(0.1, 0.2),
+     grid.col=c("green", "red"), max.auc.polygon=TRUE,
+     auc.polygon.col="skyblue", print.thres=TRUE)
+
+cat("\nComplete Case\n")
+plot(CCroc, print.auc=TRUE, auc.polygon=TRUE, grid=c(0.1, 0.2),
+     grid.col=c("green", "red"), max.auc.polygon=TRUE,
+     auc.polygon.col="skyblue", print.thres=TRUE)
+
+cat("\nAdjusted Complete Case\n")
+plot(adjustedCCroc, print.auc=TRUE, auc.polygon=TRUE, grid=c(0.1, 0.2),
+     grid.col=c("green", "red"), max.auc.polygon=TRUE,
+     auc.polygon.col="skyblue", print.thres=TRUE)
+```
+
+```{r}
+#install.packages("PredictABEL")
+library(ggplot2)
+# The Hosmer-Lemeshow test is a statistical test for goodness of fit for logistic regression models. It is used frequently in risk prediction models. The test assesses whether or not the observed event rates match expected event rates in subgroups of the model population.
+
+# Generating a calibration plot in default form from the package but simultaneously capturing the dtaa frame that is output from it for use in our ggplot
+ MICEhl = as.data.frame(PredictABEL::plotCalibration(data=data.frame(outcome), cOutcome = 1, predRisk = MICEpreds, rangeaxis = c(0,1), groups = 10)$Table_HLtest)
+ MICEhl$method = "MICE"
+ MRhl = as.data.frame(PredictABEL::plotCalibration(data=data.frame(outcome), cOutcome = 1, predRisk = MRpreds, rangeaxis = c(0,1), groups = 10)$Table_HLtest)
+ MRhl$method = "missRanger"
+ MIDAShl = as.data.frame(PredictABEL::plotCalibration(data=data.frame(outcome), cOutcome = 1, predRisk = MIDASpreds, rangeaxis = c(0,1), groups = 10)$Table_HLtest)
+ MIDAShl$method = "MIDAS"
+  MIDASVAEhl = as.data.frame(PredictABEL::plotCalibration(data=data.frame(outcome), cOutcome = 1, predRisk = MIDASVAEpreds, rangeaxis = c(0,1), groups = 10)$Table_HLtest)
+ MIDASVAEhl$method = "MIDAS VAE"
+ CChl = as.data.frame(PredictABEL::plotCalibration(data=data.frame(CCoutcome), cOutcome = 1, predRisk = CCpreds, rangeaxis = c(0,1), groups = 10)$Table_HLtest)
+ CChl$method = "Complete Case"
+ adjustedCChl = as.data.frame(PredictABEL::plotCalibration(data=data.frame(outcome), cOutcome = 1, predRisk = adjustedCCpreds, rangeaxis = c(0,1), groups = 10)$Table_HLtest)
+ adjustedCChl$method = "Adjusted Complete Case"
+
+PredictABEL::plotCalibration(data=data.frame(outcome), cOutcome = 1, predRisk = MICEpreds, rangeaxis = c(0,1), groups = 10)
+PredictABEL::plotCalibration(data=data.frame(outcome), cOutcome = 1, predRisk = MRpreds, rangeaxis = c(0,1), groups = 10)
+PredictABEL::plotCalibration(data=data.frame(outcome), cOutcome = 1, predRisk = MIDASpreds, rangeaxis = c(0,1), groups = 10)
+PredictABEL::plotCalibration(data=data.frame(outcome), cOutcome = 1, predRisk = MIDASVAEpreds, rangeaxis = c(0,1), groups = 10)
+PredictABEL::plotCalibration(data=data.frame(CCoutcome), cOutcome = 1, predRisk = CCpreds, rangeaxis = c(0,1), groups = 10)
+PredictABEL::plotCalibration(data=data.frame(outcome), cOutcome = 1, predRisk = adjustedCCpreds, rangeaxis = c(0,1), groups = 10)
+```
+
+
+
+
+
+```{r}
+# Making the linear model which goes through the points in the table from the calib plot. This linear model gives the line of best fit thorugh the observed and predicted data allowing us to visually assess our calibration
+MICEhl.lm = lm(meanobs~meanpred, data = MICEhl)$coef 
+MRhl.lm = lm(meanobs~meanpred, data = MRhl)$coef
+MIDAShl.lm = lm(meanobs~meanpred, data = MIDAShl)$coef
+MIDASVAEhl.lm = lm(meanobs~meanpred, data = MIDASVAEhl)$coef 
+CChl.lm = lm(meanobs~meanpred, data = CChl)$coef 
+adjustedCChl.lm = lm(meanobs~meanpred, data = adjustedCChl)$coef 
+
+
+# The ggplot version of the plot.
+# plot_HL <- function(hldata1, hllmodel1, hldata2, hllmodel2, title = "Calibration plot of NMDS mortality model", xlim = 1.0,ylim = 1.0, showabline = TRUE) {
+#   abltype = 8
+#   if (showabline==FALSE) {
+#       abltype = 0
+#   } 
+#   p = ggplot() +
+#     geom_abline(aes(colour="best"),intercept=0, slope=1) + # Adding in a line which is y=x that represents perfect fit
+#     
+#     geom_point(data=hldata1, aes(y=meanobs, x=meanpred), col = "blue", shape=1, size=1.5, stroke=1.5) + # Plotting the bubbles. PLot on observed and pred
+#     geom_abline(slope=hllmodel1[2], intercept = hllmodel1[1], col="blue", lwd=0.4, lty=abltype) + # Adding in the blue line which shows the best fit line through our model
+#     
+#     geom_point(data=hldata2, aes(y=meanobs, x=meanpred), col = "red", shape=1, size=1.5, stroke=1.5) + # Plotting the bubbles. PLot on observed and pred
+#     geom_abline(slope=hllmodel2[2], intercept = hllmodel2[1], col="red", lwd=0.4, lty=abltype) + # Adding in the red line which shows the best fit line through our model
+#     
+#     xlim(0,xlim) + # Set limits because the highest obs/pred is quite low
+#     ylim(0,ylim) +
+#     
+#     ggtitle(title) +
+#     xlab("Predicted risk") +
+#     ylab("Observed risk") +
+#     theme(axis.text=element_text(size=15, face="bold"), # Removing the default grid in background and changing fonts etc, aesthetics
+#         axis.title=element_text(size=14),
+#         plot.title=element_text(hjust = 0.5)) +
+#     theme_bw() + theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+#         panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"))
+# 
+#   plot(p)
+# }
+
+plot_HL <- function(hldata1, hllmodel1, hldata2, hllmodel2, hlname1, hlname2, xlim = 1.0,ylim = 1.0, showabline = TRUE) {
+  abltype = 8
+  if (showabline==FALSE) {
+      abltype = 0
+  } 
+  hldata = rbind(hldata1, hldata2)
+  #print(hldata)
+  p = ggplot() +
+    geom_abline(aes(colour="best"),intercept=0, slope=1) + # Adding in a line which is y=x that represents perfect fit
+    geom_point(data=hldata, aes(y=meanobs, x=meanpred, group = method, col = method) , shape=1, size=1.5, stroke=1.5) + 
+    geom_abline(slope=hllmodel1[2], intercept = hllmodel1[1], col="blue", lwd=0.4, lty=abltype) + 
+   # geom_point(data=hldata2, aes(y=meanobs, x=meanpred), col = "red", shape=1, size=1.5, stroke=1.5) + 
+    geom_abline(slope=hllmodel2[2], intercept = hllmodel2[1], col="red", lwd=0.4, lty=abltype) +
+    coord_fixed() +
+    xlim(0,xlim) + # Set limits because the highest obs/pred is quite low
+    ylim(0,ylim) +
+    scale_color_manual("",values = c("red","blue") ) + #c("blue","red"), brewer.pal(2, "Dark2")
+    ggtitle(paste("Calibration Plot",hlname1,"vs",hlname2)) +
+    xlab("Predicted risk") +
+    ylab("Observed risk") +
+    theme(axis.text=element_text(size=15, face="bold"), # Removing the default grid in background and changing fonts etc, aesthetics
+        axis.title=element_text(size=14),
+        plot.title=element_text(hjust = 0.5, size=14)) +
+    theme_bw() + theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), axis.line = element_line(colour = "black")) +
+  theme(legend.position="bottom")
+
+  plot(p)
+}
+
+
+plot_HL(MICEhl, MICEhl.lm, CChl, CChl.lm, "MICE", "Complete Case")
+
+plot_HL(MIDAShl, MIDAShl.lm, CChl, CChl.lm, "MIDAS", "Complete Case")
+plot_HL(MIDASVAEhl, MIDASVAEhl.lm, CChl, CChl.lm, "MIDAS VAE", "Complete Case")
+plot_HL(MICEhl, MICEhl.lm, MIDAShl, MIDAShl.lm, "MICE", "MIDAS")
+plot_HL(MIDASVAEhl, MIDASVAEhl.lm, MIDAShl, MIDAShl.lm, "MIDAS VAE", "MIDAS")
+
+plot_HL(MRhl, MRhl.lm, CChl, CChl.lm, "missRanger", "Complete Case")
+plot_HL(MRhl, MRhl.lm, MICEhl, MICEhl.lm, "missRanger", "MICE")
+plot_HL(MRhl, MRhl.lm, MIDAShl, MIDAShl.lm, "missRanger", "MIDAS")
+plot_HL(MRhl, MRhl.lm, MIDASVAEhl, MIDASVAEhl.lm, "missRanger", "MIDAS VAE")
+
+plot_HL(MICEhl, MICEhl.lm, CChl, CChl.lm, "MICE", "Complete Case", xlim=0.1, ylim=0.1, showabline=FALSE)
+plot_HL(MIDAShl, MIDAShl.lm, CChl, CChl.lm, "MIDAS", "Complete Case", xlim=0.6, ylim=0.6, showabline=TRUE)
+plot_HL(MIDASVAEhl, MIDASVAEhl.lm, CChl, CChl.lm, "MIDAS VAE", "Complete Case", xlim=0.1, ylim=0.1, showabline=FALSE)
+plot_HL(MICEhl, MICEhl.lm, MIDAShl, MIDAShl.lm, "MICE", "MIDAS", xlim=0.1, ylim=0.1, showabline=FALSE)
+plot_HL(MIDASVAEhl, MIDASVAEhl.lm, MIDAShl, MIDAShl.lm, "MIDAS VAE", "MIDAS", xlim=0.1, ylim=0.1, showabline=FALSE)
+
+plot_HL(MRhl, MRhl.lm, CChl, CChl.lm, "missRanger", "Complete Case", xlim=0.1, ylim=0.1, showabline=FALSE)
+plot_HL(MRhl, MRhl.lm, MICEhl, MICEhl.lm, "missRanger", "MICE", xlim=0.1, ylim=0.1, showabline=FALSE)
+plot_HL(MRhl, MRhl.lm, MIDAShl, MIDAShl.lm, "missRanger", "MIDAS", xlim=0.1, ylim=0.1, showabline=FALSE)
+plot_HL(MRhl, MRhl.lm, MIDASVAEhl, MIDASVAEhl.lm, "missRanger", "MIDAS VAE", xlim=0.1, ylim=0.1, showabline=FALSE)
+
+```
+
+
+
+```{r}
+plot_HL(MIDAShl, MIDAShl.lm, CChl, CChl.lm, "MIDAS", "Complete Case", xlim=1.0, ylim=1.0, showabline=TRUE)
+plot_HL(MIDAShl, MIDAShl.lm, CChl, CChl.lm, "MIDAS", "Complete Case", xlim=0.1, ylim=0.1, showabline=FALSE)
+```
+
+
+
+
+```{r}
+
+MICEMIDASdf = data.frame(MICEpreds, MIDASpreds)
+MICEMRdf = data.frame(MICEpreds, MRpreds)
+MIDASVAEMIDASdf = data.frame(MIDASVAEpreds, MIDASpreds)
+MIDASMRdf = data.frame(MIDASpreds, MRpreds)
+MIDASVAEMICEdf = data.frame(MIDASVAEpreds, MICEpreds)
+MIDASVAEMRdf = data.frame(MIDASVAEpreds, MRpreds)
+isImputedmask = rowSums(is.na(dfFulltest)) > 0 
+
+plot_probability <- function(df, yf, xf, imputedmask, title, ylabel, xlabel, shape=20
+                             , colorbyoutcome = FALSE, outcome=outcome, plotfig=TRUE) {
+  c1 = ifelse(imputedmask, yes = "red", no ="darkgreen")
+  s1 = shape
+  if (colorbyoutcome==TRUE) {
+    c1 = ifelse(outcome, yes = "red", no = "darkgreen")  
+  }
+  # if (shapebyoutcome==TRUE) {
+  #   s1 = ifelse(outcome, yes = 17, no =2)  
+  # } 
+  p = ggplot() +
+    geom_abline(aes(colour="best"),intercept=0, slope=1) + # Adding in a line which is y=x that represents perfect fit
+    geom_point(data=df, aes(y=yf, x=xf)
+               , color=c1
+               , shape=s1, size=1, stroke=1) +
+    coord_fixed() +
+    theme(legend.position="bottom") +
+    ggtitle(title) +
+    ylab(ylabel) +
+    xlab(xlabel) +
+    theme(axis.text=element_text(size=15, face="bold"), # Removing the default grid in background and aesthetics
+        axis.title=element_text(size=14),
+        plot.title=element_text(hjust = 0.5)) +
+    theme_bw() + theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"))
+  if (plotfig) plot(p)
+  else return(p)
+}
+
+micemidasbyimpute = plot_probability(MICEMIDASdf, MICEpreds, MIDASpreds, isImputedmask, title = "MICE vs MIDAS", 
+                ylabel="MICE probability", xlabel="MIDAS probability", shape=20, plotfig=FALSE)  
+
+midasvaemidasbyimpute = plot_probability(MIDASVAEMIDASdf, MIDASVAEpreds, MIDASpreds, isImputedmask, title = "MIDAS VAE vs MIDAS", 
+                ylabel="MIDAS VAE probability", xlabel="MIDAS probability", shape=20, plotfig=FALSE)  
+
+midasvaemicebyimpute = plot_probability(MIDASVAEMICEdf, MIDASVAEpreds, MICEpreds, isImputedmask, title = "MIDAS VAE vs MICE", 
+                ylabel="MIDAS VAE probability", xlabel="MICE probability", shape=20, plotfig=FALSE)  
+
+micemrbyimpute = plot_probability(MICEMRdf, MICEpreds, MRpreds, isImputedmask, title = "MICE vs missRanger", 
+                ylabel="MICE probability", xlabel="missRanger probability", shape=20, plotfig=FALSE)  
+
+mrmidasbyimpute = plot_probability(MIDASMRdf, MRpreds, MIDASpreds, isImputedmask, title = "missRanger vs MIDAS", 
+                ylabel="missRanger probability", xlabel="MIDAS probability", shape=20, plotfig=FALSE)  
+ 
+mrmidasvaebyimpute = plot_probability(MIDASVAEMRdf, MRpreds, MIDASVAEpreds, isImputedmask, title = "missRanger vs MIDAS VAE", 
+                ylabel="missRanger probability", xlabel="MIDAS VAE probability", shape=20, plotfig=FALSE)  
+cat("\nProbability Plots - Red Imputed, Green Complete\n")
+grid.newpage()
+pushViewport(viewport(layout = grid.layout(1, 2)))
+print(micemidasbyimpute, vp = vplayout(1, 1))
+print(micemrbyimpute, vp = vplayout(1, 2))
+
+grid.newpage()
+pushViewport(viewport(layout = grid.layout(1, 2)))
+print(midasvaemidasbyimpute, vp = vplayout(1, 1))
+print(midasvaemicebyimpute, vp = vplayout(1, 2))
+
+grid.newpage()
+pushViewport(viewport(layout = grid.layout(1, 2)))
+print(mrmidasbyimpute, vp = vplayout(1, 1))
+print(mrmidasvaebyimpute, vp = vplayout(1, 2))
+
+
+```
+
+
+
+```{r}
+#grouping by ASA
+MIDASVAEMIDASdf$ASA = as.factor(dfFulltest$ASA)
+cat("\nGrouping by ASA")
+  ggplot(MIDASVAEMIDASdf, aes(y=MIDASVAEpreds, x=MIDASpreds, group = ASA)) +
+    geom_abline(aes(colour="best"),intercept=0, slope=1) + # Adding in a line which is y=x that represents perfect fit
+    geom_point(aes(shape=ASA), color=ifelse(isImputedmask,yes = "red", no ="darkgreen"), size=1, stroke=1) +
+    scale_shape_manual(values=c(3, 16, 17, 20, 4)) +
+    #coord_fixed() +
+    theme(legend.position="right") +
+    ggtitle("MIDAS VAE vs MIDAS") +
+    ylab("MIDAS VAE probability") +
+    xlab("MIDAS probability") +
+     theme(axis.text=element_text(size=15, face="bold"), 
+        axis.title=element_text(size=14),
+        plot.title=element_text(hjust = 0.5))   +
+    theme_bw() + 
+    theme(panel.border = element_blank(), panel.grid.major = element_blank(), panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"))
+
+   ggplot(MIDASVAEMIDASdf, aes(y=MIDASVAEpreds, x=MIDASpreds, group = ASA)) +
+    geom_abline(aes(colour="best"),intercept=0, slope=1) + # Adding in a line which is y=x that represents perfect fit
+    geom_point(aes(shape=ASA), color=ifelse(isImputedmask,yes = "red", no ="darkgreen"), size=1, stroke=1) +
+    scale_shape_manual(values=c(3, 16, 17, 20, 4)) +
+    # coord_fixed() +
+    theme(legend.position="right") +
+    ggtitle("MIDAS VAE vs MIDAS") +
+    ylab("MIDAS VAE probability") +
+    xlab("MIDAS probability") +
+    xlim(0,0.2) + 
+    ylim(0,0.2) +
+     theme(axis.text=element_text(size=15, face="bold"), 
+        axis.title=element_text(size=14),
+        plot.title=element_text(hjust = 0.5))   +
+    theme_bw() + 
+    theme(panel.border = element_blank(), panel.grid.major = element_blank(), panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"))
+
+```
+
+```{r}
+MIDASVAEMIDASdf$outcome = outcome
+MIDASVAEMIDASdf$ASA = as.factor(dfFulltest$ASA)
+#red if mortality, green otherwise
+ 
+ ggplot(MIDASVAEMIDASdf, aes(y=MIDASVAEpreds, x=MIDASpreds, group = ASA)) +
+    geom_abline(aes(colour="best"),intercept=0, slope=1) + # Adding in a line which is y=x that represents perfect fit
+    geom_point(aes(shape=ASA), color=ifelse(outcome==1,yes = "red", no ="darkgreen"), size=1, stroke=1) +
+    scale_shape_manual(values=c(3, 16, 17, 20, 4)) +
+   coord_fixed() +
+    theme(legend.position="right") +
+    ggtitle("MIDAS VAE vs MIDAS") +
+    ylab("MIDAS VAE probability") +
+    xlab("MIDAS probability") +
+     theme(axis.text=element_text(size=15, face="bold"), 
+        axis.title=element_text(size=14),
+        plot.title=element_text(hjust = 0.5))   +
+    theme_bw() + 
+    theme(panel.border = element_blank(), panel.grid.major = element_blank(), panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"))
+
+
+
+plot_probability(MICEMIDASdf, MICEpreds, MIDASpreds, isImputedmask, title = "MICE vs MIDAS", 
+                ylabel="MICE probability", xlabel="MIDAS probability", colorbyoutcome = TRUE, outcome=outcome) 
+
+plot_probability(MIDASVAEMIDASdf, MIDASVAEpreds, MIDASpreds, isImputedmask, title = "MIDAS VAE vs MIDAS", 
+                ylabel="MIDAS VAE probability", xlabel="MIDAS probability", colorbyoutcome = TRUE, outcome=outcome) 
+
+plot_probability(MIDASVAEMICEdf, MIDASVAEpreds, MICEpreds, isImputedmask, title = "MIDAS VAE vs MICE", 
+                ylabel="MIDAS VAE probability", xlabel="MICE probability", colorbyoutcome = TRUE, outcome=outcome)   
+
+
+plot_probability(MICEMRdf, MICEpreds, MRpreds, isImputedmask, title = "MICE vs missRanger", 
+                ylabel="MICE probability", xlabel="missRanger probability", colorbyoutcome = TRUE, outcome=outcome)   
+
+plot_probability(MIDASMRdf, MRpreds, MIDASpreds, isImputedmask, title = "missRanger vs MIDAS", 
+                ylabel="missRanger probability", xlabel="MIDAS probability", colorbyoutcome = TRUE, outcome=outcome)   
+ 
+plot_probability(MIDASVAEMRdf, MRpreds, MIDASVAEpreds, isImputedmask, title = "missRanger vs MIDAS VAE", 
+                ylabel="missRanger probability", xlabel="MIDAS VAE probability", colorbyoutcome = TRUE, outcome=outcome)   
+#saveRDS(imp.mffullforests2, file = paste0(parentfolder,"MOHFinalV4MFMI3LvlASA.rds") )
+#save.image(file = paste0(parentfolder, "MOHFitAndPredictWorkSpace.RData"))
+###
+
+```
+```{r}
+#plotting only imputed points, red mortality green otherwise
+
+  # ggplot(MIDASVAEMIDASdf[isImputedmask,], aes(y=MIDASVAEpreds, x=MIDASpreds, group = ASA)) +
+  #   geom_abline(aes(colour="best"),intercept=0, slope=1) + # Adding in a line which is y=x that represents perfect fit
+  #   geom_point(aes(shape=ASA), color=ifelse(outcome[isImputedmask]==1,yes = "red", no ="darkgreen"), size=1, stroke=1) +
+  #   scale_shape_manual(values=c(3, 16, 17, 20, 4)) +
+  #   theme(legend.position="right") +
+  #   ggtitle("MIDAS VAE vs MIDAS") +
+  #   ylab("MIDAS VAE probability") +
+  #   xlab("MIDAS probability") +
+  #    theme(axis.text=element_text(size=15, face="bold"), 
+  #       axis.title=element_text(size=14),
+  #       plot.title=element_text(hjust = 0.5))   +
+  #   theme_bw() + 
+  #   theme(panel.border = element_blank(), panel.grid.major = element_blank(), panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"))
+  
+## SHOWING only imputed points
+plot_probability(MICEMIDASdf[isImputedmask,], MICEpreds[isImputedmask], MIDASpreds[isImputedmask]
+                 , isImputedmask, title = "MICE vs MIDAS", ylabel="MICE probability", xlabel="MIDAS probability"
+                 , shape=20, colorbyoutcome = TRUE, outcome=outcome[isImputedmask]) 
+
+plot_probability(MIDASVAEMIDASdf[isImputedmask,], MIDASVAEpreds[isImputedmask], MIDASpreds[isImputedmask]
+                 , isImputedmask, title = "MIDAS VAE vs MIDAS", ylabel="MIDAS VAE probability", xlabel="MIDAS probability"
+                 , shape=20, colorbyoutcome = TRUE, outcome=outcome[isImputedmask]) 
+
+plot_probability(MIDASVAEMICEdf[isImputedmask,], MIDASVAEpreds[isImputedmask], MICEpreds[isImputedmask]
+                 , isImputedmask, title = "MIDAS VAE vs MICE", ylabel="MIDAS VAE probability", xlabel="MICE probability"
+                 , shape=20, colorbyoutcome = TRUE, outcome=outcome[isImputedmask])   
+
+
+plot_probability(MICEMRdf[isImputedmask,], MICEpreds[isImputedmask], MRpreds[isImputedmask]
+                 , isImputedmask, title = "MICE vs missRanger", ylabel="MICE probability", xlabel="missRanger probability"
+                 , shape=20, colorbyoutcome = TRUE, outcome=outcome[isImputedmask])   
+
+plot_probability(MIDASMRdf[isImputedmask,], MRpreds[isImputedmask], MIDASpreds[isImputedmask]
+                 , isImputedmask, title = "missRanger vs MIDAS", ylabel="missRanger probability", xlabel="MIDAS probability"
+                 , shape=20, colorbyoutcome = TRUE, outcome=outcome[isImputedmask])   
+ 
+plot_probability(MIDASVAEMRdf[isImputedmask,], MRpreds[isImputedmask], MIDASVAEpreds[isImputedmask]
+                 , isImputedmask, title = "missRanger vs MIDAS VAE", ylabel="missRanger probability"
+                 , xlabel="MIDAS VAE probability", shape=20, colorbyoutcome = TRUE, outcome=outcome[isImputedmask])
+
+#    p = ggplot() +
+#     geom_abline(aes(colour="best"),intercept=0, slope=1) + # Adding in a line which is y=x that represents perfect fit
+#     geom_point(data=MICEMIDASdf[isImputedmask,], aes(y=MICEpreds[isImputedmask], x=MIDASpreds[isImputedmask]), color=ifelse(outcome[isImputedmask]==1,yes = "red", no ="darkgreen"), shape=20, size=1, stroke=1) +
+#     ggtitle("MICE vs MIDAS") +
+#     ylab("MICE probability") +
+#     xlab("MIDAS probability") +
+#     theme(axis.text=element_text(size=15, face="bold"), # Removing the default grid in background and changing fonts etc, aesthetics
+#         axis.title=element_text(size=14),
+#         plot.title=element_text(hjust = 0.5)) +
+#     theme_bw() + theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+#         panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"))
+#   plot(p)
+#   
+#   
+#   p = ggplot() +
+#     geom_abline(aes(colour="best"),intercept=0, slope=1) + # Adding in a line which is y=x that represents perfect fit
+#     geom_point(data=MIDASVAEMIDASdf[isImputedmask,], aes(y=MIDASVAEpreds, x=MIDASpreds), color=ifelse(outcome[isImputedmask]==1,yes = "red", no ="darkgreen"), shape=20, size=1, stroke=1) +
+#     ggtitle("MIDAS VAE vs MIDAS") +
+#     ylab("MIDAS VAE probability") +
+#     xlab("MIDAS probability") +
+#     theme(axis.text=element_text(size=15, face="bold"), # Removing the default grid in background and changing fonts etc, aesthetics
+#         axis.title=element_text(size=14),
+#         plot.title=element_text(hjust = 0.5)) +
+#     theme_bw() + theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+#         panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"))
+#   plot(p)
+#   
+#   
+#     p = ggplot() +
+#     geom_abline(aes(colour="best"),intercept=0, slope=1) + # Adding in a line which is y=x that represents perfect fit
+#     geom_point(data=MIDASVAEMICEdf[isImputedmask,], aes(y=MIDASVAEpreds[isImputedmask], x=MICEpreds[isImputedmask]),  color=ifelse(outcome[isImputedmask]==1,yes = "red", no ="darkgreen"), shape=20, size=1, stroke=1) +
+#     ggtitle("MIDAS VAE vs MICE") +
+#     ylab("MIDAS VAE probability") +
+#     xlab("MICE probability") +
+#     theme(axis.text=element_text(size=15, face="bold"), # Removing the default grid in background and changing fonts etc, aesthetics
+#         axis.title=element_text(size=14),
+#         plot.title=element_text(hjust = 0.5)) +
+#     theme_bw() + theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+#         panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"))
+#   plot(p)
+#   
+# ###
+#     
+#     
+#   p = ggplot() +
+#     geom_abline(aes(colour="best"),intercept=0, slope=1) + # Adding in a line which is y=x that represents perfect fit
+#     geom_point(data=MICEMRdf[isImputedmask,], aes(y=MICEpreds[isImputedmask], x=MRpreds[isImputedmask]), color=ifelse(outcome[isImputedmask]==1,yes = "red", no ="darkgreen"), shape=20, size=1, stroke=1) +
+#     ggtitle("MICE vs missRanger") +
+#     ylab("MICE probability") +
+#     xlab("missRanger probability") +
+#     theme(axis.text=element_text(size=15, face="bold"), # Removing the default grid in background and changing fonts etc, aesthetics
+#         axis.title=element_text(size=14),
+#         plot.title=element_text(hjust = 0.5)) +
+#     theme_bw() + theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+#         panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"))
+#   plot(p)
+#   
+#   
+#   p = ggplot() +
+#     geom_abline(aes(colour="best"),intercept=0, slope=1) + # Adding in a line which is y=x that represents perfect fit
+#     geom_point(data=MIDASMRdf[isImputedmask,], aes(y=MRpreds[isImputedmask], x=MIDASpreds[isImputedmask]), color=ifelse(outcome[isImputedmask]==1,yes = "red", no ="darkgreen"), shape=20, size=1, stroke=1) +
+#     ggtitle("missRanger vs MIDAS") +
+#     ylab("missRanger probability") +
+#     xlab("MIDAS probability") +
+#     theme(axis.text=element_text(size=15, face="bold"), # Removing the default grid in background and changing fonts etc, aesthetics
+#         axis.title=element_text(size=14),
+#         plot.title=element_text(hjust = 0.5)) +
+#     theme_bw() + theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+#         panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"))
+#   plot(p)
+#   
+#   
+#     p = ggplot() +
+#     geom_abline(aes(colour="best"),intercept=0, slope=1) + # Adding in a line which is y=x that represents perfect fit
+#     geom_point(data=MIDASVAEMRdf[isImputedmask,], aes(y=MIDASVAEpreds[isImputedmask], x=MRpreds[isImputedmask]),  color=ifelse(outcome[isImputedmask]==1,yes = "red", no ="darkgreen"), shape=20, size=1, stroke=1) +
+#     ggtitle("MIDAS VAE vs missRanger") +
+#     ylab("MIDAS VAE probability") +
+#     xlab("missRanger probability") +
+#     theme(axis.text=element_text(size=15, face="bold"), # Removing the default grid in background and changing fonts etc, aesthetics
+#         axis.title=element_text(size=14),
+#         plot.title=element_text(hjust = 0.5)) +
+#     theme_bw() + theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+#         panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"))
+#   plot(p)
+```
+
+
+```{r}
+plot_probability <- function(df, yf, xf, imputedmask, title, ylabel, xlabel, shape=1
+                             , colorbyoutcome = FALSE, outcome=outcome, plotfig=TRUE) {
+  c1 = ifelse(imputedmask, yes = "red", no ="blue")
+  s1 = shape
+  if (colorbyoutcome==TRUE) {
+    c1 = ifelse(outcome, yes = "red", no = "darkgreen")  
+  }
+  # if (shapebyoutcome==TRUE) {
+  #   s1 = ifelse(outcome, yes = 17, no =2)  
+  # } 
+  p = ggplot() +
+    geom_abline(aes(colour="best"),intercept=0, slope=1) + # Adding in a line which is y=x that represents perfect fit
+    geom_point(alpha=0.5, data=df, aes(y=yf, x=xf)
+               , color=c1
+               , shape=s1, size=1, stroke=1) +
+    coord_fixed() +
+    theme(legend.position="bottom") +
+    ggtitle(title) +
+    ylab(ylabel) +
+    xlab(xlabel) +
+    theme(axis.text=element_text(size=12, face="bold"), # Removing the default grid in background and aesthetics
+        axis.title=element_text(size=12),
+        plot.title=element_text(hjust = 0.5)) +
+    theme_bw() + theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"))
+  if (plotfig) plot(p)
+  else return(p)
+}
+
+p1 = plot_probability(MICEMIDASdf, MICEpreds, MIDASpreds, isImputedmask, title = "MICE vs MIDAS", 
+                ylabel="MICE probability", xlabel="MIDAS probability", shape=1, plotfig=FALSE)  
+
+p2 = plot_probability(MICEMIDASdf, MICEpreds, MIDASpreds, isImputedmask, title = "MICE vs MIDAS", 
+                ylabel="MICE probability", xlabel="MIDAS probability", shape=1, 
+                colorbyoutcome = TRUE, outcome=outcome, plotfig=FALSE)   
+
+p3 = plot_probability(MICEMIDASdf[isImputedmask,], MICEpreds[isImputedmask], MIDASpreds[isImputedmask]
+                 , isImputedmask, title = "MICE vs MIDAS", ylabel="MICE probability", xlabel="MIDAS probability"
+                 , shape=1, colorbyoutcome = TRUE, outcome=outcome[isImputedmask], plotfig=FALSE)  
+
+grid.newpage()
+pushViewport(viewport(layout = grid.layout(1, 3)))
+print(p1, vp = vplayout(1, 1))
+print(p2, vp = vplayout(1, 2))
+print(p3, vp = vplayout(1, 3))
+
+```
+
+```{r}
+
+p1 = plot_probability(MIDASVAEMIDASdf, MIDASVAEpreds, MIDASpreds, isImputedmask, title = "MIDAS VAE vs MIDAS", 
+                 ylabel="MIDAS VAE probability", xlabel="MIDAS probability", shape=1,plotfig=FALSE)  
+
+p2 = plot_probability(MIDASVAEMIDASdf, MIDASVAEpreds, MIDASpreds, isImputedmask, title = "MIDAS VAE vs MIDAS", 
+                ylabel="MIDAS VAE probability", xlabel="MIDAS probability", shape=1, 
+                colorbyoutcome = TRUE, outcome=outcome, plotfig=FALSE)   
+
+p3 = plot_probability(MIDASVAEMIDASdf[isImputedmask,], MIDASVAEpreds[isImputedmask], MIDASpreds[isImputedmask]
+                 , isImputedmask, title = "MIDAS VAE vs MIDAS", ylabel="MIDAS VAE probability", xlabel="MIDAS probability"
+                 , shape=1, colorbyoutcome = TRUE, outcome=outcome[isImputedmask], plotfig=FALSE) 
+
+
+grid.newpage()
+pushViewport(viewport(layout = grid.layout(1, 3)))
+print(p1, vp = vplayout(1, 1))
+print(p2, vp = vplayout(1, 2))
+print(p3, vp = vplayout(1, 3))
+
+```
+```{r}
+p1 = plot_probability(MIDASMRdf, MRpreds, MIDASpreds, isImputedmask, title = "missRanger vs MIDAS"
+                      , ylabel="missRanger probability", xlabel="MIDAS probability", shape=1,plotfig=FALSE)  
+
+p2 = plot_probability(MIDASMRdf, MRpreds, MIDASpreds, isImputedmask, title = "missRanger vs MIDAS"
+                      , ylabel="missRanger probability", xlabel="MIDAS probability",shape=1, colorbyoutcome = TRUE
+                      , outcome=outcome, plotfig=FALSE)   
+
+p3 = plot_probability(MIDASMRdf[isImputedmask,], MRpreds[isImputedmask], MIDASpreds[isImputedmask]
+                 , isImputedmask, title = "missRanger vs MIDAS", ylabel="missRanger probability", xlabel="MIDAS probability"
+                 , shape=1, colorbyoutcome = TRUE, outcome=outcome[isImputedmask], plotfig=FALSE)    
+
+grid.newpage()
+pushViewport(viewport(layout = grid.layout(1, 3)))
+print(p1, vp = vplayout(1, 1))
+print(p2, vp = vplayout(1, 2))
+print(p3, vp = vplayout(1, 3))
+```
+
+```{r}
+p1 = plot_probability(MIDASVAEMRdf, MRpreds, MIDASVAEpreds, isImputedmask, title = "msRanger vs MIDASVAE"
+                      , ylabel="missRanger probability", xlabel="MIDAS VAE probability", shape=1,plotfig=FALSE)  
+
+p2 = plot_probability(MIDASVAEMRdf, MRpreds, MIDASVAEpreds, isImputedmask, title = "msRanger vs MIDASVAE"
+                      , ylabel="missRanger probability", xlabel="MIDAS VAE probability",shape=1, colorbyoutcome = TRUE
+                      , outcome=outcome, plotfig=FALSE)   
+
+p3 = plot_probability(MIDASVAEMRdf[isImputedmask,], MRpreds[isImputedmask], MIDASVAEpreds[isImputedmask]
+                 , isImputedmask, title = "msRanger vs MIDASVAE", ylabel="missRanger probability", xlabel="MIDAS VAE probability"
+                 , shape=1, colorbyoutcome = TRUE, outcome=outcome[isImputedmask], plotfig=FALSE)    
+
+grid.newpage()
+pushViewport(viewport(layout = grid.layout(1, 3)))
+print(p1, vp = vplayout(1, 1))
+print(p2, vp = vplayout(1, 2))
+print(p3, vp = vplayout(1, 3))
+
+```
+
+```{r}
+
+p1 = plot_probability(MICEMRdf, MRpreds, MICEpreds, isImputedmask, title = "missRanger vs MICE"
+                      , ylabel="missRanger probability", xlabel="MICE probability", shape=1,plotfig=FALSE)  
+
+p2 = plot_probability(MICEMRdf, MRpreds, MICEpreds, isImputedmask, title = "missRanger vs MICE"
+                      , ylabel="missRanger probability", xlabel="MICE probability",shape=1, colorbyoutcome = TRUE
+                      , outcome=outcome, plotfig=FALSE)   
+
+p3 = plot_probability(MICEMRdf[isImputedmask,], MRpreds[isImputedmask], MICEpreds[isImputedmask]
+                 , isImputedmask, title = "missRanger vs MICE", ylabel="missRanger probability", xlabel="MICE probability"
+                 , shape=1, colorbyoutcome = TRUE, outcome=outcome[isImputedmask], plotfig=FALSE)    
+
+grid.newpage()
+pushViewport(viewport(layout = grid.layout(1, 3)))
+print(p1, vp = vplayout(1, 1))
+print(p2, vp = vplayout(1, 2))
+print(p3, vp = vplayout(1, 3))
+
+```
+```{r}
+#table(MICEpreds, outcome)
+#table(round(MICEpreds),outcome)
+# install.packages("caret",
+#                  repos = "http://cran.r-project.org", 
+#                  dependencies = c("Depends", "Imports", "Suggests"))
+
+# source("https://bioconductor.org/biocLite.R")
+# biocLite("Biobase")
+
+#install.packages("caret")
+library(caret)
+#install.packages("Biobase")
+table(outcome)
+#   0    1 
+#8871 2946 
+fMICEpreds = round(MICEpreds)
+fMICEpreds = as.factor( round(MICEpreds))
+foutcome = as.factor(outcome)
+# caret::confusionMatrix(round(MICEpreds),outcome)
+# lvs <- c("normal", "abnormal")
+# truth <- factor(rep(lvs, times = c(86, 258)),
+#                 levels = rev(lvs))
+# pred <- factor(
+#                c(
+#                  rep(lvs, times = c(54, 32)),
+#                  rep(lvs, times = c(27, 231))),
+#                levels = rev(lvs))
+# 
+# xtab <- table(pred, truth)
+# 
+# confusionMatrix(xtab)
+
+confusionMatrix(fMICEpreds,foutcome,positive="1")
+```
+```{r}
+# cat("\nMICE\n")
+# confusionMatrix(as.factor( round(MICEpreds)),as.factor(outcome))
+# 
+# cat("\nmissRanger\n")
+# confusionMatrix(as.factor( round(MRpreds)),as.factor(outcome))
+# 
+# cat("\nMIDAS\n")
+# confusionMatrix(as.factor( round(MIDASpreds)),as.factor(outcome))
+# 
+# cat("\nMIDAS VAE\n")
+# confusionMatrix(as.factor( round(MIDASVAEpreds)),as.factor(outcome))
+# 
+# cat("\nadjustedCC\n")
+# confusionMatrix(as.factor( round(adjustedCCpreds)),as.factor(outcome))
+# 
+# cat("\nCC\n")
+# confusionMatrix(as.factor( round(CCpreds)),as.factor(CCoutcome))
+
+showmetrics <- function(preds, outcome) {
+  cat("\n",deparse(substitute(preds)))
+  lossvector = ifelse(outcome==1, yes=-log(preds), no=-log(1-preds))
+  roc1 = roc(outcome~preds)
+  cat("\nmean loss: ",mean(lossvector))
+  cat("\nsum loss: ",sum(lossvector))
+  cat("\nauc: ",auc(roc1))
+  cat("\nauc ci: ",ci(auc(roc1)),"\n")
+  return (confusionMatrix(as.factor( round(preds)),as.factor(outcome), positive='1'))
+}
+
+showmetrics(MICEpreds, outcome)
+showmetrics(MRpreds, outcome)
+showmetrics(MIDASpreds, outcome)
+showmetrics(MIDASVAEpreds, outcome)
+showmetrics(adjustedCCpreds, outcome)
+showmetrics(CCpreds, CCoutcome)
+```
+
+

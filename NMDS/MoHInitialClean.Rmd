@@ -1,0 +1,436 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+This version with some ASA transformations incorporated
+```{r}
+parentfolder = "c:\\PDH\\Moh\\"
+datafile = "MOHFinalV3.csv"
+
+df<- read.csv(paste0(parentfolder,datafile), header=TRUE
+              ,comment.char = "",  skip =0,  check.names = FALSE
+              ,na.strings=c("NA","NaN", ""))#,colClasses=mfColInfo)
+str(df)
+summary(df)
+```
+
+
+```{r}
+# Minor Cleanup and Transformations
+df$ethnicGroup=as.factor(df$ethnicGroup)
+df$DHB=as.factor(df$DHB)
+#df$facility=as.factor(df$facility)
+df$opChapNum=as.factor(df$opChapNum)
+df$op02ChapNum=as.factor(df$op02ChapNum)
+df$op03ChapNum=as.factor(df$op03ChapNum)
+df$opSeverity=as.factor(df$opSeverity)
+df$ASA=as.factor(df$ASA)
+df$isEmergency=as.factor(df$isEmergency)
+df$InHospitalMortality=as.factor(df$InHospitalMortality)
+df$ShortTermMortality1d=as.factor(df$ShortTermMortality1d)
+df$ShortTermMortality3d=as.factor(df$ShortTermMortality3d)
+df$LongTermMortality30d=as.factor(df$LongTermMortality30d)
+df$LongTermMortality1year=as.factor(df$LongTermMortality1year)
+df$LongTermMortality2year=as.factor(df$LongTermMortality2year)
+df$Dep_score <- as.ordered(df$Dep_score)
+df$ASA=as.ordered(df$ASA)
+
+# Some non ascii characters are present in the 1st column. Rename to clear up
+colnames(df)[1] <- "gender"
+
+# ASA 9 means never got one. For our purposes, we treat this the same as missing.
+ df[which((df$ASA)==9),]$ASA=NA 
+#df.data = df[,c(-10, -22, -25, -28, -31, -36)]
+#Omit off drugs1m, labs1m etc. We only want 6m and 12m. Take off mortality1d as too much overlap.
+df.data = df[,c(-22, -25, -28, -31, -36)] 
+str(df.data)
+
+#apply(df.data,2, class)
+summary(df.data)
+#summary (df.data$ASA)
+#summary (df.data$opChapNum)
+
+datafile = "MOHFinalFirstClean.csv"
+write.csv(df.data, paste0(parentfolder,datafile), row.names=F,  na = "")
+
+```
+Additional processing to simplify the dataset
+and also to align it with requirements for NZ Surgical Risk calculator.
+The NZ Surgical Risk calculator uses the following fields
+
+1) Acuity             - Acute or not acute
+2) Age                - Continuous integer
+3) Cancer Status      - A true / false
+4) ASA                - Using ASA as a 3 group category. ASA1/2 , ASA 3 , ASA 4/5
+5) Grade of surgery   - Factor of 1-5
+6) Surgical specialty - High risk named specialties and other. 
+The last two are suggested as 'additional predictors' in the plan
+7) Gender             - Male / Female
+8) Ethnicity          - Using 3 levels, Maori / Pacific / Other 
+
+
+Preprocessing to make it consistent with previous work
+```{r}
+#not required
+#d_covariates = d_covariates[-(which(d_covariates$opSeverity == 999)),]
+#d_covariates$opSeverity=d_covariates$opSeverity[,drop=TRUE]
+d_covariates = df.data
+#summary(d_covariates)
+#drop ASA 6 since they are already dead before hitting the table
+d_covariates = d_covariates[-(which(d_covariates$ASA == 6)),]
+d_covariates$ASA=d_covariates$ASA[,drop=TRUE]
+#d_covariates$ASA = as.factor(d_covariates$ASA)
+#d_covariates$ASA = as.ordered(d_covariates$ASA)
+
+#Leave this for later
+# summary(d_covariates$ASA)
+# d_covariates$threeGroupASA = ifelse(d_covariates$ASA == 1, yes = "ASA1/2"
+#                                 , no = ifelse(d_covariates$ASA == 2, yes = "ASA1/2"
+#                                     , no = ifelse(d_covariates$ASA == 3, yes = "ASA 3"
+#                                         , no = ifelse(d_covariates$ASA == 4, yes = "ASA 4/5"
+#                                             , no = "ASA 4/5"))))
+# 
+# d_covariates$threeGroupASA = relevel(as.factor(d_covariates$threeGroupASA), ref = "ASA1/2")
+
+## Things that need to be classified from the database dataset. 
+# These were all tested in multiple ways and then decided on as the final pass way of including them
+
+## Ethnicity is used as a 3 level covariate. Maori, Pacific, Not Maori/Pacific. 
+d_covariates$ethnicity3Groups = NA
+#nrow(d_covariates)
+d_covariates$ethnicity3Groups[which(d_covariates$ethnicGroup == 2 | d_covariates$ethnicGroup == 21)] = 'Maori'
+d_covariates$ethnicity3Groups[which(d_covariates$ethnicGroup == 3 | (as.numeric(as.character(d_covariates$ethnicGroup))>= 30 & as.numeric(as.character(d_covariates$ethnicGroup)) <= 37))] = 'Pacific'
+d_covariates$ethnicity3Groups[which(is.na(d_covariates$ethnicity3Groups))] = 'Not Maori/Pacific'
+# Make sure to relevel factors so that the odds ratios appear in the right order
+d_covariates$ethnicity3Groups = relevel(as.factor(d_covariates$ethnicity3Groups), ref = 'Not Maori/Pacific')
+
+# Grade needs to be converted into a two factor variable moving 4/5 together vs the others
+# d_covariates$Surg_grade_4_5 = ifelse(d_covariates$Surgical_grade == 5, yes = "4_5", no = ifelse(d_covariates$Surgical_grade == 4, yes = "4_5", no = "1-3"))
+
+# d_covariates$Surg_grade_4_5 = ifelse(d_covariates$opSeverity == 5, yes = "4_5"
+#                                      , no = ifelse(d_covariates$opSeverity == 4, yes = "4_5"
+#                                      , no = ifelse(is.na(d_covariates$opSeverity) == TRUE, yes = NA, no= "1-3")))
+
+#check this
+# d_covariates$Surg_grade_4_5 = relevel(as.factor(d_covariates$Surg_grade_4_5), ref = "1-3")
+
+#summary(d_covariates$Surg_grade_4_5)
+
+#is.na(d_covariates$opSeverity) 
+d_covariates$Acuity = ifelse(d_covariates$AdmissionType == "AC", yes = "acute", no = "elective")
+d_covariates$Acuity = relevel(as.factor(d_covariates$Acuity), ref = "elective")
+
+d_covariates$Age = as.integer(floor(d_covariates$opAgeYearsFractional))
+
+d_covariates$cancerStatus = as.logical(ifelse(d_covariates$IsCancer == "Y", yes = "TRUE", no = "FALSE"))
+
+
+
+# # Need to set up the death times from the data - used for different outlook models (30d, 1y, 2y)
+# d_covariates$deathAt30 = ifelse(timeToDeath < 31, yes = 1, no = 0)
+# d_covariates$deathAt365 = ifelse(timeToDeath < 366, yes = 1, no = 0)
+# d_covariates$deathAt730 = ifelse(timeToDeath < 731, yes = 1, no = 0)
+d_covariates$Mortality30 = d_covariates$LongTermMortality30d
+d_covariates$Mortality365 = d_covariates$LongTermMortality1year
+d_covariates$Mortality730 = d_covariates$LongTermMortality2year#
+
+
+# Giving surgical specialties a name rather than a number for cleaner output
+# Chapter 1 Procedures on Nervous System [1-86]
+# Chapter 2 Procedures on Endocrine System [110-129]
+# Chapter 3 Procedures on Eye and Adnexa [160-256]
+# Chapter 4 Procedures on Ear and Mastoid Process [300-333]
+# Chapter 5 Procedures on Nose, Mouth and Pharynx [370-422]
+# Chapter 6 Dental Services [450-490]
+# Chapter 7 Procedures on Respiratory System [520-571]
+# Chapter 8 Procedures on Cardiovascular System [600-777]
+# Chapter 9 Procedures Blood and Blood-Forming Organs [800-817]
+# Chapter 10 Procedures on Digestive System [850-1011]
+# Chapter 11 Procedures on Urinary System [1040-1129]
+# Chapter 12 Procedures on Male Genital Organs [1160-1203]
+# Chapter 13 Gynaecological Procedures [1240-1299]
+# Chapter 14 Obstetric Procedures [1330-1347]
+# Chapter 15 Procedures on Musculoskeletal System [1360-1580]
+# Chapter 16 Dermatological and Plastic Procedures [1600-1718]
+# Chapter 17 Procedures on Breast [1740-1759]
+# Chapter 18 Radiation Oncology Procedures [1786-1799]
+# Chapter 19 Noninvasive, cognitive and Other Interventions, Not Elsewhere Classified [1820-1922]
+# Chapter 20 Imaging Services [1940-2016] 
+summary(d_covariates$opChapNum)
+summary(d_covariates$op02ChapNum)
+summary(d_covariates$op03ChapNum)
+
+#Do this post imputation
+# fullSurgSpecList = c("1_nervousSystem","2_endocrineSystem","3_eyeAndAdnexa","4_earAndMastoidProcess","5_noseMouthAndPharynx","7_respiratorySystem","8_vascularSystem"
+#                      ,"9_bloodAndBloodFormingOrgans","10_digestiveSystem","11_urinarySystem","12_maleGenitalOrgans","13_gynaecological","14_obstetric","15_musculoskeletalSystem"
+#                      ,"16_dermatologicalAndPlastic")
+# fullSurgSpecList2 = c("0_None","1_nervousSystem","2_endocrineSystem","3_eyeAndAdnexa","4_earAndMastoidProcess","5_noseMouthAndPharynx","6_dental","7_respiratorySystem"
+#                       ,"8_vascularSystem","9_bloodAndBloodFormingOrgans","10_digestiveSystem","11_urinarySystem","12_maleGenitalOrgans","13_gynaecological","14_obstetric"
+#                       ,"15_musculoskeletalSystem","16_dermatologicalAndPlastic","18_radiationOncology","19_NonInvasiveandOther","20_Imaging")
+# fullSurgSpecList3 = c("0_None","1_nervousSystem","2_endocrineSystem","3_eyeAndAdnexa","4_earAndMastoidProcess","5_noseMouthAndPharynx","6_dental","7_respiratorySystem"
+#                       ,"8_vascularSystem","9_bloodAndBloodFormingOrgans","10_digestiveSystem","11_urinarySystem","12_maleGenitalOrgans","13_gynaecological","14_obstetric"
+#                       ,"15_musculoskeletalSystem","16_dermatologicalAndPlastic","17_breast","18_radiationOncology","19_NonInvasiveandOther","20_Imaging")
+
+#d_covariates$surgSpecBreakdownFullList = mapvalues(x=d_covariates$Surg_spec, from = levels(as.factor(d_covariates$Surg_spec)), to=fullSurgSpecList)
+# d_covariates$surgSpec01 = mapvalues(x=d_covariates$opChapNum, from = levels(as.factor(d_covariates$opChapNum)), to=fullSurgSpecList)
+# d_covariates$surgSpec02 = mapvalues(x=d_covariates$op02ChapNum, from = levels(as.factor(d_covariates$op02ChapNum)), to=fullSurgSpecList2)
+# d_covariates$surgSpec03 = mapvalues(x=d_covariates$op03ChapNum, from = levels(as.factor(d_covariates$op03ChapNum)), to=fullSurgSpecList3)
+
+summary(d_covariates)
+#remove enthnicGrop, DHB, endType, opSeverity, opAgeYears,opAgeYearsFractional, AdmissionType, AgeAtAdmission, ShortermMortality3d, 30d, 1year, 2year
+#df.data2 = d_covariates[,c(-2,-3,-5,-9, -10, -11, -13, -16, -30, -32, -33, -34, -35)]
+df.data2 = d_covariates[,c(-2,-3,-5, -10, -11, -13, -16, -30, -32, -33, -34, -35)] #leave opSeverity in
+summary(df.data2)
+
+cat(toString(shQuote(sapply(df.data2, class))), "\n")
+str(df.data2)
+datafile = "MOHFinalSecondClean.csv"
+write.csv(df.data2, paste0(parentfolder,datafile), row.names=F,  na = "")
+```
+STOP HERE! Go on to MOHCreateDatasets.R
+
+#################################################################################################
+```{r}
+#Original - if we plan to split before imputing
+dfOrg = df.data
+set.seed(101)
+sample <- sample.int(n = nrow(dfOrg), size = floor(.70*nrow(dfOrg)), replace = F)
+trainOrg <- dfOrg[sample, ]
+testOrg  <- dfOrg[-sample, ]
+
+par(mfrow=c(1,2))
+plot(trainOrg$InHospitalMortality)
+plot(testOrg$InHospitalMortality)
+
+write.csv(trainOrg, paste0(parentfolder,"MOHFinalV4OrgTrain.csv"), row.names=F,  na = "") 
+write.csv(testOrg, paste0(parentfolder,"MOHFinalV4OrgTest.csv"), row.names=F,  na = "")  
+```
+
+
+Create Complete Case Train and Test Dataset where records with missing values are dropped.
+
+```{r}
+dfComplete = na.omit(df.data)
+summary(dfComplete)
+
+set.seed(101)
+sample <- sample.int(n = nrow(dfComplete), size = floor(.70*nrow(dfComplete)), replace = F)
+trainNM <- dfComplete[sample, ]
+testNM  <- dfComplete[-sample, ]
+
+par(mfrow=c(1,2))
+plot(trainNM$InHospitalMortality)
+plot(testNM$InHospitalMortality)
+
+write.csv(trainNM, paste0(parentfolder,"MOHFinalV4CompleteCaseTrain.csv"), row.names=F,  na = "")  #11766
+write.csv(testNM, paste0(parentfolder,"MOHFinalV4CompleteCaseTest.csv"), row.names=F,  na = "")  #5043
+
+# dfNoMissingNo9s = dfNoMissing[which((dfNoMissing$ASA)!=9),]
+# set.seed(101)
+# sample <- sample.int(n = nrow(dfNoMissingNo9s), size = floor(.70*nrow(dfNoMissingNo9s)), replace = F)
+# trainNMN9 <- dfNoMissingNo9s[sample, ]
+# testNMN9  <- dfNoMissingNo9s[-sample, ]
+# write.csv(trainNMN9, "c:\\PDH\\MoH18PlusTrainMissing9Dropped.csv", row.names=F,  na = "")  #10002
+# write.csv(testNMN9, "c:\\PDH\\MoH18PlusTestMissing9Dropped.csv", row.names=F,  na = "")    #4287
+```
+
+
+Play around with correlation
+```{r}
+# dfComplete$InHospitalMortality=as.integer(dfComplete$InHospitalMortality)
+# nums <- unlist(lapply(dfComplete, is.numeric))  
+# dta.r <- abs(cor(dfComplete[ , nums]))
+# dta.r
+# dfComplete$InHospitalMortality=as.factor(dfComplete$InHospitalMortality)
+```
+
+Manual Impute. Modes and Means.
+Create Manual Impute Train and Test Datasets.
+```{r}
+dfImputed = df.data
+
+Mode <- function(x) {
+  ux <- unique(x)
+  ux[which.max(tabulate(match(x, ux)))]
+}
+
+dfImputed[which(is.na(dfImputed$opSeverity)),]$opSeverity=2 #2 what about 999? Filtered by noncardiac events
+
+#dfImputed[which((dfImputed$ASA)==9),]$ASA=2 #11895
+#dfImputed[which(is.na(dfImputed$ASA)),]$ASA=Mode(dfImputed$ASA) #7739
+dfImputed[which(is.na(dfImputed$ASA)),]$ASA = 2
+
+dfImputed[which(is.na(dfImputed$isEmergency)),]$isEmergency=Mode(dfImputed$isEmergency)
+
+dfImputed$Dep_score <- as.ordered(dfImputed$Dep_score)
+dfImputed[which(is.na(dfImputed$Dep_score)),]$Dep_score=Mode(dfImputed$Dep_score)
+
+summary(dfImputed)
+
+set.seed(101)
+sample <- sample.int(n = nrow(dfImputed), size = floor(.70*nrow(dfImputed)), replace = F)
+trainImpute <- dfImputed[sample, ]
+testImpute  <- dfImputed[-sample, ]
+par(mfrow=c(1,2))
+plot(trainImpute$InHospitalMortality)
+plot(testImpute$InHospitalMortality)
+
+write.csv(trainImpute, paste0(parentfolder,"MOHFinalV4ImputeTrain.csv"), row.names=F,  na = "")  #27584
+write.csv(testImpute, paste0(parentfolder,"MOHFinalV4ImputeTest.csv"), row.names=F,  na = "")    #11823
+
+```
+
+If we had to reload.
+```{r}
+# mfColInfo2 = c("factor", "factor", "factor", "factor", "factor", "factor", "factor", "factor", "factor", "numeric"
+#                ,"integer", "factor", "factor", "factor", "factor", "factor", "factor", "factor", "factor", "factor"
+#                ,"integer", "integer", "integer", "integer", "integer", "integer", "integer", "integer", "numeric"
+#                ,"factor","factor", "factor", "factor", "factor")
+# datafile2 = paste0(parentfolder, "FirstAdmissions18PlusFrom2006SubsetDistilledV2NCCleaned.csv")
+# 
+# df2<- read.csv(datafile2, header=TRUE
+#               ,comment.char = "",  skip =0,  check.names = FALSE
+#               ,na.strings=c("NA","NaN", ""),colClasses=mfColInfo2)
+# df2$Dep_score <- as.ordered(df2$Dep_score)
+# 
+# #df2[which((df2$ASA)==9),]$ASA=NA #11895
+# df.dataForMI = df2
+# summary(df.dataForMI)
+```
+
+Do the missForest MI imputation
+
+```{r}
+df.dataForMI = df.data
+#install.packages("doParallel")
+#install.packages("missForest")
+require(doParallel)
+registerDoParallel(cores=4)
+getDoParWorkers()
+library(missForest)
+
+set.seed(81)
+mffullfd.start = Sys.time()
+imp.mffullforests = missForest(df.dataForMI, variablewise = TRUE, verbose = TRUE, parallelize = 'forests')
+mffullfd.end = Sys.time()
+mffull.forestsduration = mffullfd.end - mffullfd.start
+mffull.forestsduration
+
+#Time difference of 1.530393 days Mimic
+# Time difference of 11.49234 mins - Time difference of 4.994217 mins
+
+summary(imp.mffullforests$ximp)
+str(imp.mffullforests$ximp)
+summary(imp.mffullforests$OOBerror)
+imp.mffullforests$OOBerror
+
+saveRDS(imp.mffullforests, file = paste0(parentfolder,"MOHFinalV4MFMI.rds") )
+write.csv(imp.mffullforests$ximp, file = paste0(parentfolder,"MOHFinalV4MFMI.csv"), row.names=F)
+write.csv(imp.mffullforests$OOBerror, file = paste0(parentfolder,"MOHFinalV4MFMIOOBerror.csv") )
+
+save.image(file = paste0(parentfolder, "moh_work_space_9020.RData"))
+
+```
+
+
+IF we had to reload else comment this out
+```{r}
+# mfColInfo3 = c("factor", "factor", "factor", "factor", "factor", "factor", "factor", "factor", "factor", "numeric"
+#                ,"integer", "factor", "factor", "factor", "factor", "factor", "factor", "factor", "factor", "factor"
+#                ,"integer", "integer", "integer", "integer", "integer", "integer", "integer", "integer", "numeric"                 ,"factor","factor", "factor", "factor", "factor")
+# 
+# imputeddatafile = paste0(parentfolder, "mohimp.mffullforests.csv")
+# 
+# dfmi<- read.csv(imputeddatafile, header=TRUE
+#                 ,comment.char = "",  skip =0,  check.names = FALSE
+#                 ,na.strings=c("NA","NaN", ""),colClasses=mfColInfo3)
+# 
+# 
+# summary(dfmi)
+# str(dfmi)
+```
+
+
+Now create the MI test and train sets.
+```{r}
+dfmi = imp.mffullforests$ximp
+set.seed(101)
+sample <- sample.int(n = nrow(dfmi), size = floor(.70*nrow(dfmi)), replace = F)
+trainMI <- dfmi[sample, ]
+testMI  <- dfmi[-sample, ]
+par(mfrow=c(1,2))
+plot(trainMI$InHospitalMortality)
+plot(testMI$InHospitalMortality)
+
+write.csv(trainMI, paste0(parentfolder,"MOHFinalV4MITrain.csv"), row.names=F,  na = "")  #
+write.csv(testMI, paste0(parentfolder,"MOHFinalV4MITest.csv"), row.names=F,  na = "")    #
+
+```
+#if we make the ASA 3 level before imputing...
+```{r}
+require(doParallel)
+registerDoParallel(cores=4)
+getDoParWorkers()
+library(missForest)
+
+
+df.dataForMI2 = df.data
+# To be consistent, drop ASA 6 since they are already dead before hitting the table
+df.dataForMI2 = df.dataForMI2[-(which(df.dataForMI2$ASA == 6)),]
+df.dataForMI2$ASA=df.dataForMI2$ASA[,drop=TRUE]
+
+df.dataForMI2$ASA = ifelse(df.dataForMI2$ASA == 1, yes = "ASA1/2"
+                                , no = ifelse(df.dataForMI2$ASA == 2, yes = "ASA1/2"
+                                    , no = ifelse(df.dataForMI2$ASA == 3, yes = "ASA 3"
+                                        , no = ifelse(df.dataForMI2$ASA == 4, yes = "ASA 4/5"
+                                            , no = "ASA 4/5"))))
+#df.dataForMI2$ASA = as.factor(df.dataForMI2$ASA)
+df.dataForMI2$ASA = relevel(as.factor(df.dataForMI2$ASA), ref = "ASA1/2")
+
+summary(df.dataForMI2)
+set.seed(81)
+mffullfd2.start = Sys.time()
+imp.mffullforests2 = missForest(df.dataForMI2, variablewise = TRUE, verbose = TRUE, parallelize = 'forests')
+mffullfd2.end = Sys.time()
+mffull.forestsduration2 = mffullfd2.end - mffullfd2.start
+mffull.forestsduration2
+
+#Time difference of 1.530393 days Mimic vs Time difference of 5.900927 mins
+
+summary(imp.mffullforests2$ximp)
+str(imp.mffullforests2$ximp)
+summary(imp.mffullforests2$OOBerror)
+imp.mffullforests2$OOBerror
+
+saveRDS(imp.mffullforests2, file = paste0(parentfolder,"MOHFinalV4MFMI3LvlASA.rds") )
+write.csv(imp.mffullforests2$ximp, file = paste0(parentfolder,"MOHFinalV4MFMI3LvlASA.csv"), row.names=F)
+write.csv(imp.mffullforests2$OOBerror, file = paste0(parentfolder,"MOHFinalV4MFMI3LvlASAOOBerror.csv") )
+
+save.image(file = paste0(parentfolder, "moh_work_space_3LvlASA.RData"))
+ #     ASA        isEmergency  IsCancer 
+ # 1   : 5193   Min.   : 18.00   Min.   : 18.00       Min.   :   0.000   AA: 7290      ASA1/2 :12908   0   : 5789   N:35958  
+ # 2   :21931   1st Qu.: 36.00   1st Qu.: 35.94       1st Qu.:   0.000   AC:18469      ASA 3  : 2973   1   :25142   Y: 3449  
+ # 3   : 8750   Median : 55.00   Median : 55.35       Median :   1.000   AP:    1      ASA 4/5: 1882   NA's: 8476            
+ # 4   : 2880   Mean   : 54.54   Mean   : 54.53       Mean   :   3.361   RL:    1      NA's   :21644 
+
+
+```
+
+```{r}
+
+#install.packages("mice")
+
+require(mice)
+require(lattice)
+
+set.seed(81)
+starttm = Sys.time()
+mohimp <- parlmice(df.data2, m=40, maxit=40, cluster.seed = 81, print=TRUE)
+endtm = Sys.time()
+micetime = endtm - starttm
+micetime
+#Time difference of 2.197196 hours - actually moh
+saveRDS(mohimp, file = paste0(parentfolder,"MiceImpMohV4Final.rds"))
+```
+
+

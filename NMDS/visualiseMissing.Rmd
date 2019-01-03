@@ -1,0 +1,209 @@
+
+```{r}
+parentfolder = "c:\\PDH\\Moh\\"
+datafile = "MOHFinalSecondClean.csv"
+
+mColInfo = c("factor", "factor", "factor", "factor", "factor", "factor", "integer", "factor", "factor", "factor"
+             , "factor", "factor", "factor", "factor", "integer", "integer", "integer", "integer", "integer", "integer"
+             , "integer", "integer", "factor", "factor", "factor", "character", "integer", "logical", "factor", 
+             "factor", "factor"  )
+
+df<- read.csv(paste0(parentfolder,datafile), header=TRUE
+              ,comment.char = "",  skip =0,  check.names = FALSE
+              ,na.strings=c("NA","NaN", ""),colClasses=mColInfo)
+
+df$ethnicity3Groups = relevel(as.factor(df$ethnicity3Groups), ref = 'Not Maori/Pacific')
+#df$Surg_grade_4_5 = relevel(as.factor(df$Surg_grade_4_5), ref = "1-3")
+df$Acuity = relevel(as.factor(df$Acuity), ref = "elective")
+df$Dep_score=as.ordered(df$Dep_score)
+df$ASA=as.ordered(df$ASA)
+
+str(df)
+summary(df)
+
+# to avoid 1<10<2<3......
+str(df$Dep_score)
+df$Dep_score = as.numeric(as.character(df$Dep_score))
+df$Dep_score = as.ordered(df$Dep_score)
+
+# to avoid 1<10<2<3......
+df$opChapNum = as.numeric(as.character(df$opChapNum))
+df$opChapNum = as.factor(df$opChapNum)
+df$op02ChapNum = as.numeric(as.character(df$op02ChapNum))
+df$op02ChapNum = as.factor(df$op02ChapNum)
+df$op03ChapNum = as.numeric(as.character(df$op03ChapNum))
+df$op03ChapNum = as.factor(df$op03ChapNum)
+
+
+#true binary
+# isEmergency,InHospitalMortality,cancerStatus,Mortality30,Mortality365,Mortality730
+# binary cats -> recode to binary
+# ,gender_F,gender_M
+# ,IsSmoker_N,IsSmoker_Y,WasSmoker_N,WasSmoker_Y,HasDiabetesT1_N,HasDiabetesT1_Y,HasDiabetesT2_N,HasDiabetesT2_Y,IsNeuroTrauma_N,IsNeuroTrauma_Y
+# ordinal
+# opSeverity,ASA,Dep_score
+# True cats
+# ,eventType_ID,eventType_IM,eventType_IP
+# ,opChapNum,op02ChapNum,op03ChapNum,
+# ,ethnicity3Groups_Maori,ethnicity3Groups_Not Maori/Pacific,ethnicity3Groups_Pacific
+levels(df$IsSmoker) <- c(0,1)
+levels(df$WasSmoker) <- c(0,1)
+levels(df$HasDiabetesT1) <- c(0,1)
+levels(df$HasDiabetesT2) <- c(0,1)
+levels(df$IsNeuroTrauma) <- c(0,1)
+levels(df$gender) <- c(0,1)
+names(df)[1] <- "IsMale"
+names(df)[names(df) == 'gender'] <- 'IsMale'
+names(df)[names(df) == 'isEmergency'] <- 'IsEmergency'
+names(df)[names(df) == 'cancerStatus'] <- 'HasCancer'
+df$HasCancer = as.factor(df$HasCancer)
+levels(df$HasCancer) <- c(0,1)
+
+
+
+
+str(df)
+summary(df)
+table(df$Dep_score)
+
+#Split into train and test datasets
+#Original - if we plan to split before imputing
+dfOrg = df
+set.seed(101)
+```
+
+Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Ctrl+Alt+I*.
+
+When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Ctrl+Shift+K* to preview the HTML file).
+
+The preview shows you a rendered HTML copy of the contents of the editor. Consequently, unlike *Knit*, *Preview* does not run any R code chunks. Instead, the output of the chunk when it was last run in the editor is displayed.
+```{r}
+library(ggplot2)
+
+
+
+
+
+
+
+
+```
+
+```{r}
+install.packages("naniar")
+library(naniar)
+vis_miss(airquality)
+vis_miss(df)
+```
+
+```{r}
+set.seed(101)
+sample <- sample.int(n = nrow(dfOrg), size = floor(.70*nrow(dfOrg)), replace = F)
+trainOrg <- dfOrg[sample, ]
+testOrg  <- dfOrg[-sample, ]
+```
+
+```{r}
+vis_miss(trainOrg)
+```
+
+```{r}
+vis_miss(testOrg)
+```
+```{r}
+gg_miss_upset(df)
+```
+
+```{r}
+n_var_miss(df)
+```
+
+```{r}
+gg_miss_upset(df, nsets = n_var_miss(df))
+```
+```{r}
+gg_miss_upset(df, 
+              nsets = 10,
+              nintersects = NA)
+```
+```{r}
+library(ggplot2)
+# using regular geom_point()
+ggplot(airquality,
+       aes(x = Ozone,
+           y = Solar.R)) +
+geom_point()
+```
+
+```{r}
+library(naniar)
+
+# using  geom_miss_point()
+ggplot(airquality,
+       aes(x = Ozone,
+           y = Solar.R)) +
+ geom_miss_point()
+```
+
+```{r}
+# Facets!
+ggplot(airquality,
+       aes(x = Ozone,
+           y = Solar.R)) +
+ geom_miss_point() + 
+ facet_wrap(~Month)
+```
+
+```{r}
+ggplot(df,
+       aes(x = as.numeric(as.character(Dep_score)),
+           y = LOS)) +
+ geom_miss_point() + 
+ facet_wrap(~IsSmoker)
+
+
+ggplot(df,
+       aes(x = as.numeric(as.character(Dep_score)),
+           y = LOS)) +
+ geom_miss_point() + 
+ facet_wrap(~ASA)
+
+
+ggplot(df,
+       aes(x = as.numeric(as.character(opSeverity)),
+           y = LOS)) +
+ geom_miss_point() + 
+ facet_wrap(~ASA)
+
+
+ggplot(df,
+       aes(x = as.numeric(as.character(ASA)),
+           y = LOS)) +
+ geom_miss_point() + 
+ facet_wrap(~opSeverity)
+
+```
+
+```{r}
+
+gg_miss_var(df)
+
+library(ggplot2)
+gg_miss_var(df) + labs(y = "Look at all the missing ones")
+
+gg_miss_var(df, show_pct = TRUE)
+
+```
+
+
+```{r}
+gg_miss_var(df,
+            facet = Acuity, show_pct = TRUE)
+```
+```{r}
+gg_miss_case(df)
+```
+```{r}
+gg_miss_fct(x = df$opSeverity, fct = df$ASA)
+```
+

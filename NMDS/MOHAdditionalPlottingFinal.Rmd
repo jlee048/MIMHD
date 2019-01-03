@@ -1,0 +1,294 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+
+```{r}
+cmmice = showmetrics(MICEpreds, outcome)
+
+cmmice = confusionMatrix(as.factor( round(MICEpreds)),as.factor(outcome), positive='1')
+cmmice
+cmmice$overall[1]
+```
+
+
+```{r}
+cmmice = confusionMatrix(as.factor( round(MICEpreds)),as.factor(outcome), positive='1')
+cmmr = confusionMatrix(as.factor( round(MRpreds)),as.factor(outcome), positive='1')
+cmmidas = confusionMatrix(as.factor( round(MIDASpreds)),as.factor(outcome), positive='1')
+cmmidasvae = confusionMatrix(as.factor( round(MIDASVAEpreds)),as.factor(outcome), positive='1')
+cmcc = confusionMatrix(as.factor( round(CCpreds)),as.factor(CCoutcome), positive='1')
+# cmmice$byClass["Pos Pred Value"]
+#   overall["Accuracy"]
+
+
+method = c("Complete case", "MICE", "missRanger", "MIDAS", "MIDASVAE")
+metric = c("Accuracy", "Brier", "Pos Pred Value", "Neg Pred Value", "Mean Loss", "AUC")
+accuracy = c(cmcc$overall["Accuracy"],cmmice$overall["Accuracy"],cmmr$overall["Accuracy"],cmmidas$overall["Accuracy"]
+             ,cmmidasvae$overall["Accuracy"])
+accuracy = accuracy/accuracy[1] * 100
+
+Brier = c(CCbrier, MICEbrier, MRbrier, MIDASbrier, MIDASVAEbrier)
+Brier = Brier/Brier[1] * 100
+
+posPredValue = c(cmcc$byClass["Pos Pred Value"],cmmice$byClass["Pos Pred Value"],cmmr$byClass["Pos Pred Value"]
+                 ,cmmidas$byClass["Pos Pred Value"],cmmidasvae$byClass["Pos Pred Value"])
+posPredValue =   posPredValue/posPredValue[1] * 100
+
+negPredValue = c(cmcc$byClass["Neg Pred Value"],cmmice$byClass["Neg Pred Value"],cmmr$byClass["Neg Pred Value"]
+                 ,cmmidas$byClass["Neg Pred Value"],cmmidasvae$byClass["Neg Pred Value"])
+negPredValue = negPredValue/negPredValue[1] * 100
+
+meanloss = c(CCmeanloss, MICEmeanloss, MRmeanloss, MIDASmeanloss, MIDASVAEmeanloss)
+meanloss = meanloss/meanloss[1] * 100
+
+auc = c(CCci[2], MICEci[2],MRci[2], MIDASci[2], MIDASVAEci[2])
+auc = auc/auc[1] * 100
+# CCci[1]
+# CCci[2]
+# CCci[3]
+# CCci
+#summarydf = data.frame(method, accuracy, accuracyN, precision, precisionN, negpredvalue, negpredvalueN, meanloss, meanlossN, auc,
+summarydf = data.frame(method, accuracy, Brier, posPredValue, negPredValue, meanloss, auc)
+
+```
+
+
+```{r}
+library(reshape)
+library(data.table)
+
+sdf2 = data.frame(t(summarydf))
+sdf2 
+
+names(sdf2) = summarydf$method
+setDT(sdf2, keep.rownames = TRUE)[]
+colnames(sdf2)[1] <- "Metric"
+
+#sdf3 = sdf2[c(3,5,7,9, 11),]
+sdf3 = sdf2[-1]
+sdf3$"Complete case"=round(as.numeric(as.character(sdf3$"Complete case")),1)
+sdf3$"MICE"=round(as.numeric(as.character(sdf3$"MICE")),1)
+sdf3$"missRanger"=round(as.numeric(as.character(sdf3$"missRanger")),1)
+sdf3$"MIDAS"=round(as.numeric(as.character(sdf3$"MIDAS")),1)
+sdf3$"MIDASVAE"=round(as.numeric(as.character(sdf3$"MIDASVAE")),1)
+sdf3
+```
+
+```{r}
+library(reshape2)
+
+# reshape your data into long format
+sdf3l <- melt(sdf3, id=c("Metric"))
+sdf3l
+
+#create color palette:
+library(RColorBrewer)
+coul = brewer.pal(5, "Dark2") 
+
+#values = c("red","blue","green","yellow"), 
+# make the plot
+ggplot(sdf3l) +
+  geom_bar(aes(x = Metric, y = value, fill = variable), 
+           stat="identity", position = "dodge", width = 0.7) +
+  scale_fill_manual("Method\n", values = coul, 
+                    labels = c("Complete Case", "MICE", "missRanger", "MIDAS", "MIDASVAE")) +
+  labs(x="",y="Relative Performance %\n") +
+  ggtitle("Performance Relative to Complete Case (100%)") +
+  ylim(c(0,160)) +
+  theme_bw(base_size = 14) + 
+  theme(axis.text.x = element_text(angle = 60, hjust = 1))
+```
+
+```{r}
+# CCpredsMICE <- predict.glm(fitCC, newdata = dfMICEtestPrepped[dfMICEtestPrepped$.imp==1,], type="response")
+# CCpredsMR <- predict.glm(fitCC, newdata = dfMRtestPrepped[dfMRtestPrepped$.imp==1,], type="response")
+# CCpredsMIDAS <- predict.glm(fitCC, newdata = dfMIDAStestPrepped[dfMIDAStestPrepped$.imp==1,], type="response")
+# CCpredsMIDASVAE <- predict.glm(fitCC, newdata = dfMIDASVAEtestPrepped[dfMIDASVAEtestPrepped$.imp==1,], type="response")
+
+#applying imputed test datasets to Complete Case model i.e. more data
+CCMICEpreds <- rowMeans(sapply(1:m, function(x) predict.glm(fitCC, newdata = dfMICEtestPrepped[dfMICEtestPrepped$.imp==x,], type="response")))
+CCMRpreds <- rowMeans(sapply(1:m, function(x) predict.glm(fitCC, newdata = dfMRtestPrepped[dfMRtestPrepped$.imp==x,], type="response")))
+CCMIDASpreds <- rowMeans(sapply(1:m, function(x) predict.glm(fitCC, newdata = dfMIDAStestPrepped[dfMIDAStestPrepped$.imp==x,], type="response")))
+CCMIDASVAEpreds <- rowMeans(sapply(1:m, function(x) predict.glm(fitCC, newdata = dfMIDASVAEtestPrepped[dfMIDASVAEtestPrepped$.imp==x,], type="response")))
+
+
+CCMICElossvector = ifelse(outcome==1, yes=-log(CCMICEpreds), no=-log(1-CCMICEpreds))
+CCMRlossvector = ifelse(outcome==1, yes=-log(CCMRpreds), no=-log(1-CCMRpreds))
+CCMIDASlossvector = ifelse(outcome==1, yes=-log(CCMIDASpreds), no=-log(1-CCMIDASpreds))
+CCMIDASVAElossvector = ifelse(outcome==1, yes=-log(CCMIDASVAEpreds), no=-log(1-CCMIDASVAEpreds))
+
+CCMICEmeanloss = mean(CCMICElossvector) 
+CCMICEsumloss = sum(CCMICElossvector)
+CCMRmeanloss = mean(CCMRlossvector) 
+CCMRsumloss = sum(CCMRlossvector)
+CCMIDASmeanloss = mean(CCMIDASlossvector) 
+CCMIDASsumloss = sum(CCMIDASlossvector)
+CCMIDASVAEmeanloss = mean(CCMIDASVAElossvector) 
+CCMIDASVAEsumloss = sum(CCMIDASVAElossvector)
+
+cat("mean loss\n")
+cbind(MICEloss = CCMICEmeanloss, MRloss = CCMRmeanloss, MIDASloss = CCMIDASmeanloss, MIDASVAEloss = CCMIDASVAEmeanloss, CCLoss=CCmeanloss)
+
+cat("\nsum loss\n")
+cbind(MICEloss = CCMICEsumloss, MRloss = CCMRsumloss, MIDASloss = CCMIDASsumloss, MIDASVAEloss = CCMIDASVAEsumloss, CCLoss=CCsumloss)
+
+```
+The above uses averaged probability over all 40 datasets
+Compared to using just 1st imputed dataset
+mean loss
+      MICEloss    MRloss CCMIDASmeanloss MIDASVAEloss    CCLoss
+[1,] 0.3246275 0.3673971       ?    0.3832039 0.1696779
+
+sum loss
+     MICEloss   MRloss MIDASloss MIDASVAEloss  CCLoss
+[1,] 3836.123 4341.531  4693.304     4528.321 855.007
+
+
+Compared to using imputed models
+mean loss
+      MICEloss    MRloss MIDASloss MIDASVAEloss    CCLoss adjustedCCLoss
+[1,] 0.2297861 0.2604949 0.2397141    0.2334464 0.1696779      0.4167898
+
+sum loss
+     MICEloss   MRloss MIDASloss MIDASVAEloss  CCLoss adjustedCCLoss
+[1,] 2715.382 3078.269  2832.702     2758.636 855.007       4925.205
+```{r}
+
+cat("mean loss\n")
+cbind(MICEloss = CCMICEmeanloss, MRloss = CCMRmeanloss, MIDASloss = CCMIDASmeanloss, MIDASVAEloss = CCMIDASVAEmeanloss, CCLoss=CCmeanloss)
+
+cat("\nsum loss\n")
+cbind(MICEloss = CCMICEsumloss, MRloss = CCMRsumloss, MIDASloss = CCMIDASsumloss, MIDASVAEloss = CCMIDASVAEsumloss, CCLoss=CCsumloss)
+
+```
+
+```{r}
+CCMICEbrier = mean((CCMICEpreds - outcome)^2)
+CCMRbrier = mean((CCMRpreds - outcome)^2)
+CCMIDASbrier = mean((CCMIDASpreds - outcome)^2)
+CCMIDASVAEbrier = mean((CCMIDASVAEpreds - outcome)^2)
+CCbrier = mean((CCpreds - CCoutcome)^2)
+
+
+cat("\nBrier scores\n")
+cbind(CCMICEbrier, CCMRbrier, CCMIDASbrier, CCMIDASVAEbrier, CCbrier, adjustedCCbrier)
+
+```
+
+Compared to
+Brier scores
+      MICEbrier    MRbrier MIDASbrier MIDASVAEbrier    CCbrier adjustedCCbrier
+[1,] 0.06899898 0.08221635 0.07204966    0.06947581 0.05159532       0.1409384
+
+
+```{r}
+showmetrics(CCMICEpreds, outcome)
+showmetrics(CCMRpreds, outcome)
+showmetrics(CCMIDASpreds, outcome)
+showmetrics(CCMIDASVAEpreds, outcome)
+showmetrics(adjustedCCpreds, outcome)
+showmetrics(CCpreds, CCoutcome)
+
+```
+
+```{r}
+CCMICEroc = roc(outcome~CCMICEpreds)
+(auc(CCMICEroc))
+CCMICEci = ci(CCMICEroc)
+
+CCMIDASroc = roc(outcome~CCMIDASpreds)
+(auc(CCMIDASroc))
+CCMIDASci = ci(CCMIDASroc)
+
+
+cmmice = confusionMatrix(as.factor( round(MICEpreds)),as.factor(outcome), positive='1')
+cmmr = confusionMatrix(as.factor( round(MRpreds)),as.factor(outcome), positive='1')
+cmmidas = confusionMatrix(as.factor( round(MIDASpreds)),as.factor(outcome), positive='1')
+cmmidavaes = confusionMatrix(as.factor( round(MIDASVAEpreds)),as.factor(outcome), positive='1')
+cmcc = confusionMatrix(as.factor( round(CCpreds)),as.factor(CCoutcome), positive='1')
+#use this as base
+cmccmice = confusionMatrix(as.factor( round(CCMICEpreds)),as.factor(outcome), positive='1')
+cmccmidas = confusionMatrix(as.factor( round(CCMIDASpreds)),as.factor(outcome), positive='1')
+
+
+# cmmice$byClass["Pos Pred Value"]
+#   overall["Accuracy"]
+
+
+method = c("Complete case (MIDAS Test Data)", "MICE", "missRanger", "MIDAS", "MIDASVAE")
+metric = c("Accuracy", "Brier", "Pos Pred Value", "Neg Pred Value", "Mean Loss", "AUC")
+accuracy = c(cmccmidas$overall["Accuracy"],cmmice$overall["Accuracy"],cmmr$overall["Accuracy"]
+             ,cmmidas$overall["Accuracy"], cmmidasvae$overall["Accuracy"])
+accuracy = accuracy/accuracy[1] * 100
+
+Brier = c(CCMICEbrier, MICEbrier, MRbrier, MIDASbrier, MIDASVAEbrier)
+Brier = Brier/Brier[1] * 100
+
+posPredValue = c(cmccmidas$byClass["Pos Pred Value"],cmmice$byClass["Pos Pred Value"],cmmr$byClass["Pos Pred Value"],cmmidas$byClass["Pos Pred Value"],cmmidasvae$byClass["Pos Pred Value"])
+posPredValue =   posPredValue/posPredValue[1] * 100
+
+negPredValue = c(cmccmidas$byClass["Neg Pred Value"],cmmice$byClass["Neg Pred Value"],cmmr$byClass["Neg Pred Value"],cmmidas$byClass["Neg Pred Value"],cmmidasvae$byClass["Neg Pred Value"])
+negPredValue = negPredValue/negPredValue[1] * 100
+
+meanloss = c(CCMIDASmeanloss, MICEmeanloss, MRmeanloss, MIDASmeanloss, MIDASVAEmeanloss)
+meanloss = meanloss/meanloss[1] * 100
+
+auc = c(CCMIDASci[2], MICEci[2],MRci[2], MIDASci[2], MIDASVAEci[2])
+auc = auc/auc[1] * 100
+# CCci[1]
+# CCci[2]
+# CCci[3]
+# CCci
+#summarydf = data.frame(method, accuracy, accuracyN, precision, precisionN, negpredvalue, negpredvalueN, meanloss, meanlossN, auc,
+summarydf = data.frame(method, accuracy, Brier, posPredValue, negPredValue, meanloss, auc)
+```
+
+```{r}
+library(reshape)
+library(data.table)
+
+sdf2 = data.frame(t(summarydf))
+sdf2 
+
+names(sdf2) = summarydf$method
+setDT(sdf2, keep.rownames = TRUE)[]
+colnames(sdf2)[1] <- "Metric"
+
+#sdf3 = sdf2[c(3,5,7,9, 11),]
+sdf3 = sdf2[-1]
+sdf3$"Complete case (MIDAS Test Data)"=round(as.numeric(as.character(sdf3$"Complete case (MIDAS Test Data)")),1)
+sdf3$"MICE"=round(as.numeric(as.character(sdf3$"MICE")),1)
+sdf3$"missRanger"=round(as.numeric(as.character(sdf3$"missRanger")),1)
+sdf3$"MIDAS"=round(as.numeric(as.character(sdf3$"MIDAS")),1)
+sdf3$"MIDASVAE"=round(as.numeric(as.character(sdf3$"MIDASVAE")),1)
+sdf3
+
+```
+
+```{r}
+library(reshape2)
+
+# reshape your data into long format
+sdf3l <- melt(sdf3, id=c("Metric"))
+sdf3l
+
+#create color palette:
+library(RColorBrewer)
+coul = brewer.pal(5, "Dark2") 
+
+#values = c("red","blue","green","yellow"), 
+# make the plot
+ggplot(sdf3l) +
+  geom_bar(aes(x = Metric, y = value, fill = variable), 
+           stat="identity", position = "dodge", width = 0.7) +
+  scale_fill_manual("Method\n", values = coul, 
+                    labels = c("Complete Case\n(MIDAS Test Data)", "MICE", "missRanger", "MIDAS", "MIDASVAE")) +
+  labs(x="",y="Relative Performance %\n") +
+  ggtitle("Performance Relative to Complete Case with MIDAS (100%)") +
+  ylim(c(0,160)) +
+  theme_bw(base_size = 14) + 
+  theme(axis.text.x = element_text(angle = 60, hjust = 1))
+```
+

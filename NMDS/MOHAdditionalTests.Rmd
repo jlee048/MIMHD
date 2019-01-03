@@ -1,0 +1,260 @@
+---
+title: "R Notebook"
+output:
+  word_document: default
+  html_document:
+    df_print: paged
+---
+
+```{r}
+library(mice)
+#Load in our helper functions to prep the datasets and do roc plotting
+parentfolder = "c:\\PDH\\Moh\\"
+rdsfolder = "c:\\PDH\\Moh\\rds"
+source(paste0(parentfolder,"HelperFunctions1.R"))
+
+modelformula = InHospitalMortality ~ 1 + Age + IsMale + ethnicity3Groups+ surg01Spec + surg02Spec+ surg03Spec + 
+  ASA + Acuity + HasCancer + IsSmoker + WasSmoker
+```
+
+```{r}
+
+dfMIDAStrainPrepped =  readRDS(paste0(rdsfolder,"dfMIDAStrainPrepped.rds"))
+dfMIDASVAEtrainPrepped =  readRDS(paste0(rdsfolder,"dfMIDASVAEtrainPrepped.rds"))
+dfMRtrainPrepped =  readRDS(paste0(rdsfolder,"dfMRtrainPrepped.rds"))
+dfMICEtrainPrepped =  readRDS(paste0(rdsfolder,"dfMICEtrainPrepped.rds"))
+dfCCtrainPrepped =  readRDS(paste0(rdsfolder,"dfCCtrainPrepped.rds"))
+```
+
+```{r}
+#Fit Models
+m=40
+
+fitMICE =  readRDS(paste0(rdsfolder,"fitMICE.rds"))
+fitMR =  readRDS(paste0(rdsfolder,"fitMR.rds"))
+fitMIDAS =  readRDS(paste0(rdsfolder,"fitMIDAS.rds"))
+fitMIDASVAE =  readRDS(paste0(rdsfolder,"fitMIDASVAE.rds"))
+fitCC =  readRDS(paste0(rdsfolder,"fitCC.rds"))
+```
+
+```{r}
+#summary statistics for fitted models
+#calculating coefficients and their means
+fitMICEestimatescoefs = sapply(fitMICE, function(x) summary(x)$coefficients[,1])
+fitMICEestimates = apply(fitMICEestimatescoefs,1,mean)
+#rownames(impfitestimates) = names(impfitted[[1]]$coefficients) #putting the names back in
+#m = number of imputations m = NCOL(impfitestimates)
+
+fitMRestimatescoefs = sapply(fitMR, function(x) summary(x)$coefficients[,1])
+fitMRestimates = apply(fitMRestimatescoefs,1,mean)
+
+fitMIDASestimatescoefs = sapply(fitMIDAS, function(x) summary(x)$coefficients[,1])
+fitMIDASestimates = apply(fitMIDASestimatescoefs,1,mean)
+
+fitMIDASVAEestimatescoefs = sapply(fitMIDASVAE, function(x) summary(x)$coefficients[,1])
+fitMIDASVAEestimates = apply(fitMIDASVAEestimatescoefs,1,mean)
+
+fitCCestimates = summary(fitCC)$coefficients[,1]
+
+#cbind(MICEp.value = round(summary(pool(fitMICEmids))$p.value,4), MICEestimates = summary(pool(fitMICEmids))$estimate, fitMICEestimates, fitMRestimates, fitMIDASestimates, fitMIDASVAEestimates, fitCCestimates )
+```
+
+
+```{r}
+#Predict with test datasets
+#Load test data and do final prep and transforms before predictions
+
+#loading org file to compare response/outcome for imputations
+traincolInfo = c("factor", "factor", "factor", "factor", "factor", "factor", "integer", "factor", "factor", "factor"
+            ,"factor","factor", "factor", "factor", "integer", "integer", "integer", "integer", "integer", "integer"
+            , "integer", "integer", "factor", "factor","factor", "factor", "integer", "factor", "factor", "factor", "factor")
+dfFulltest <- read.csv(paste0(parentfolder,"MOHFinalOrgTest.csv"), header=TRUE
+                ,comment.char = "",  skip =0,  check.names = FALSE, na.strings=c("NA","NaN", ""), colClasses=traincolInfo)
+dfFulltestPrepped=prepDataSet(dfFulltest)
+dfFulltestPrepped=prepNamesAndLevel(dfFulltestPrepped)
+
+
+dfMICEtestPrepped =  readRDS(paste0(rdsfolder,"dfMICEtestPrepped.rds"))
+dfMRtestPrepped =  readRDS(paste0(rdsfolder,"dfMRtestPrepped.rds"))
+dfMIDAStestPrepped =  readRDS(paste0(rdsfolder,"dfMIDAStestPrepped.rds"))
+dfMIDASVAEtestPrepped =  readRDS(paste0(rdsfolder,"dfMIDASVAEtestPrepped.rds"))
+dfCCtestPrepped =  readRDS(paste0(rdsfolder,"dfCCtestPrepped.rds"))
+
+```
+
+```{r}
+#Calculate predictions using fitted model on test datasets
+
+#create model matrix for each imputed test dataset
+MICEmodelmatrix <- lapply(1:m, function(x)  model.matrix( ~ 1 + Age + IsMale+ ethnicity3Groups+ surg01Spec + surg02Spec+ surg03Spec+ 
+                                                  ASA + Acuity + HasCancer + IsSmoker + WasSmoker
+                                                , data=dfMICEtestPrepped[dfMICEtestPrepped$.imp==x,]))
+
+MRmodelmatrix <- lapply(1:m, function(x)  model.matrix( ~ 1 + Age + IsMale+ ethnicity3Groups+ surg01Spec + surg02Spec+ surg03Spec+ 
+                                                  ASA + Acuity + HasCancer + IsSmoker + WasSmoker
+                                                , data=dfMRtestPrepped[dfMRtestPrepped$.imp==x,]))
+
+MIDASmodelmatrix <- lapply(1:m, function(x)  model.matrix( ~ 1 + Age + IsMale+ ethnicity3Groups+ surg01Spec + surg02Spec+ surg03Spec+ 
+                                                  ASA + Acuity + HasCancer + IsSmoker + WasSmoker
+                                                , data=dfMIDAStestPrepped[dfMIDAStestPrepped$.imp==x,]))
+
+MIDASVAEmodelmatrix <- lapply(1:m, function(x)  model.matrix( ~ 1 + Age + IsMale+ ethnicity3Groups+ surg01Spec + surg02Spec+ surg03Spec+ 
+                                                  ASA + Acuity + HasCancer + IsSmoker + WasSmoker
+                                                , data=dfMIDASVAEtestPrepped[dfMIDASVAEtestPrepped$.imp==x,]))
+
+#get list of vectors containing predictions for each imputed test dataset
+MICEpredslogit <- lapply(1:m, function(x) t(fitMICEestimates %*% t(MICEmodelmatrix[[x]])))
+MRpredslogit <- lapply(1:m, function(x) t(fitMRestimates %*% t(MRmodelmatrix[[x]])))
+MIDASpredslogit <- lapply(1:m, function(x) t(fitMIDASestimates %*% t(MIDASmodelmatrix[[x]])))
+MIDASVAEpredslogit <- lapply(1:m, function(x) t(fitMIDASVAEestimates %*% t(MIDASVAEmodelmatrix[[x]])))
+
+
+#convert predictions to probabilty with inverse logit
+MICEpredsmatrix <- sapply(MICEpredslogit, function(x) plogis(x))
+MICEpredslist <- lapply(1:m, function(x) plogis(MICEpredslogit[[x]]))
+#probs <- lapply(1:40, function(x) plogis(preds[[x]]))
+#prb1 = as.vector(probs[[1]])
+#prb1m = probasmatrix[,1]
+#all(prb1 == prb1m)
+MRpredsmatrix <- sapply(MRpredslogit, function(x) plogis(x))
+MRpredslist <- lapply(1:m, function(x) plogis(MRpredslogit[[x]]))
+
+MIDASpredsmatrix <- sapply(MIDASpredslogit, function(x) plogis(x))
+MIDASpredslist <- lapply(1:m, function(x) plogis(MIDASpredslogit[[x]]))
+
+MIDASVAEpredsmatrix <- sapply(MIDASVAEpredslogit, function(x) plogis(x))
+MIDASVAEpredslist <- lapply(1:m, function(x) plogis(MIDASVAEpredslogit[[x]]))
+
+
+#combine the m sets of probabilities by taking the mean
+MICEpreds = apply(MICEpredsmatrix, 1, mean)
+MRpreds = apply(MRpredsmatrix, 1, mean)
+MIDASpreds = apply(MIDASpredsmatrix, 1, mean)
+MIDASVAEpreds = apply(MIDASVAEpredsmatrix, 1, mean)
+
+#this has fewer rows 
+CCpreds <- predict.glm(fitCC, newdata = dfCCtestPrepped, type="response")
+
+```
+
+```{r}
+#calculate loss
+outcome = as.numeric(as.character(dfFulltest$InHospitalMortality))
+CCoutcome = as.numeric(as.character(dfCCtestPrepped$InHospitalMortality))
+
+#MICEpredresult = data.frame(prediction=MICEpreds, outcome)
+MICElossvector = ifelse(outcome==1, yes=-log(MICEpreds), no=-log(1-MICEpreds))
+MICEmeanloss = mean(MICElossvector)
+MICEsumloss = sum(MICElossvector)
+
+MRlossvector = ifelse(outcome==1, yes=-log(MRpreds), no=-log(1-MRpreds))
+MRmeanloss = mean(MRlossvector)
+MRsumloss = sum(MRlossvector)
+
+#MIDASpredresult = data.frame(prediction=MIDASpreds, outcome)
+MIDASlossvector = ifelse(outcome==1, yes=-log(MIDASpreds), no=-log(1-MIDASpreds))
+MIDASmeanloss = mean(MIDASlossvector)
+MIDASsumloss = sum(MIDASlossvector)
+
+MIDASVAElossvector = ifelse(outcome==1, yes=-log(MIDASVAEpreds), no=-log(1-MIDASVAEpreds))
+MIDASVAEmeanloss = mean(MIDASVAElossvector)
+MIDASVAEsumloss = sum(MIDASVAElossvector)
+
+#for complete case
+CClossvector = ifelse(CCoutcome==1, yes=-log(CCpreds), no=-log(1-CCpreds))
+# Mean loss lower could suggest patients in complete case records are....easier to predict? or are thy healthier from population perspective?
+CCmeanloss = mean(CClossvector) 
+CCsumloss = sum(CClossvector) #This loss is for fewer records so not comparing apples with apples
+
+
+#Calculating a "TRUE-er" loss
+#Issue with missing data: There is a bunch of ppl we can't predict, so we predict based on average distribution of mortality
+#To adjust for effect of records missing values, instead of dropping them, we should give the affected rows probability of sum(inhospitalmortality)/total records
+#we can use sum(outcome)/nrow(dfFulltest) since the distribution should be approximately the same as whole dataset
+
+#using distribution of mortality as default probability
+probabilityOfMortality=sum(as.numeric(as.character(dfFulltest$InHospitalMortality)))/nrow(dfFulltest)
+
+#we pass a test df with nas into fitted model
+adjustedCCpreds <- predict.glm(fitCC, newdata = dfFulltestPrepped, type="response")
+#this is the adjusted predictions where we fill in blanks with the default probability based on mortality distribution
+adjustedCCpreds[which(is.na(adjustedCCpreds)==1)] = probabilityOfMortality
+
+adjustedCClossvector = ifelse(outcome==1, yes=-log(adjustedCCpreds), no=-log(1-adjustedCCpreds))
+adjustedCCmeanloss = mean(adjustedCClossvector) 
+adjustedCCsumloss = sum(adjustedCClossvector)
+
+cat("mean loss\n")
+cbind(MICEloss = MICEmeanloss, MRloss = MRmeanloss, MIDASloss = MIDASmeanloss, MIDASVAEloss = MIDASVAEmeanloss, CCLoss=CCmeanloss, adjustedCCLoss = adjustedCCmeanloss)
+
+cat("\nsum loss\n")
+cbind(MICEloss = MICEsumloss, MRloss = MRsumloss, MIDASloss = MIDASsumloss, MIDASVAEloss = MIDASVAEsumloss, CCLoss=CCsumloss, adjustedCCLoss = adjustedCCsumloss)
+
+```
+
+```{r}
+library(pscl)
+library(pROC)
+library(ggplot2)
+library(grid)
+library(caret)
+
+#Exploratory -  what do we get when apply a complete case test set to fitted MICE model
+
+#create model matrix for each imputed test dataset
+CCmodelMatrix <- model.matrix( ~ 1 + Age + IsMale+ ethnicity3Groups+ surg01Spec + surg02Spec+ surg03Spec+ 
+                                                  ASA + Acuity + HasCancer + IsSmoker + WasSmoker
+                                                , data=dfCCtestPrepped)
+#colnames(CCmodelMatrix)
+#names(fitMICEestimates)
+#remove surg03Spec18_radiationOncology because test data does not have it
+fitMICEestimatesCC = fitMICEestimates[-20]
+fitMRestimatesCC = fitMRestimates[-20]
+fitMIDASestimatesCC = fitMIDASestimates[-20]
+fitMIDASVAEestimatesCC = fitMIDASVAEestimates[-20]
+#fitMICEestimatesCC
+
+#get list of vectors containing predictions for each imputed test dataset
+MICEpredsCC <-  t(fitMICEestimatesCC %*% t(CCmodelMatrix))
+MRpredsCC <-  t(fitMRestimatesCC %*% t(CCmodelMatrix))
+MIDASpredsCC <-  t(fitMIDASestimatesCC %*% t(CCmodelMatrix))
+MIDASVAEpredsCC <-  t(fitMIDASVAEestimatesCC %*% t(CCmodelMatrix))
+
+#convert predictions to probabilty with inverse logit
+MICEpredsCC <- plogis(MICEpredsCC[,1])
+MRpredsCC <- plogis(MRpredsCC[,1])
+MIDASpredsCC <- plogis(MIDASpredsCC[,1])
+MIDASVAEpredsCC <- plogis(MIDASVAEpredsCC[,1])
+
+#calculate loss
+
+#predresultcc = data.frame(pred=imppredcc, outcome=outcomecc)
+showmetrics <- function(preds, outcome) {
+  cat("\n",deparse(substitute(preds)))
+  lossvector = ifelse(outcome==1, yes=-log(preds), no=-log(1-preds))
+  roc1 = roc(outcome~preds)
+  cat("\nmean loss: ",mean(lossvector))
+  cat("\nsum loss: ",sum(lossvector))
+  cat("\nauc: ",auc(roc1))
+  cat("\nauc ci: ",ci(auc(roc1)),"\n")
+  confusionMatrix(as.factor( round(preds)),as.factor(outcome), positive='1')
+}
+
+
+```
+```{r}
+showmetrics(CCpreds, CCoutcome)
+showmetrics(MICEpredsCC, CCoutcome)
+showmetrics(MRpredsCC, CCoutcome)
+showmetrics(MIDASpredsCC, CCoutcome)
+showmetrics(MIDASVAEpredsCC, CCoutcome)
+```
+
+
+```{r}
+showmetrics(adjustedCCpreds, outcome)
+showmetrics(MICEpreds, outcome)
+showmetrics(MRpreds, outcome)
+showmetrics(MIDASpreds, outcome)
+showmetrics(MIDASVAEpreds, outcome)
+```
